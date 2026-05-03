@@ -17,30 +17,51 @@ primitives) and [`swarmkit`](https://github.com/vinayprograms/swarmkit)
   shell/content guards, policy, credentials, shutdown coordination.
 - `swarmkit` gives you the **radio** — messaging, task dispatch,
   heartbeats, agent registry.
-- `agentcore` tells you **how the pieces typically fit together** — an
-  Agentfile DSL, a goal-driven runtime, drift detection, sessions, skills,
-  packaging.
+- `agentcore` tells you **how the pieces typically fit together** — a
+  composition-tree workflow runtime, supervision pipeline, content-guard
+  wiring, hooks, and packaging.
 
 Pragmatic, not dogmatic. Agents are free to mix `agentcore`, `agentkit`,
 and `swarmkit` directly; `agentcore` never forces indirection.
 
-## Planned packages
+## Packages
 
-The first cut (in-progress) extracts and generalizes proven patterns from
-an existing working agent. Intended surface:
-
-| Package | Purpose |
+| Package | Status |
 |---|---|
-| `agentfile` | Parser for the Dockerfile-style agent DSL (NAME / INPUT / AGENT / GOAL / RUN / LOOP / CONVERGE) |
-| `runtime` | Goal-driven agentic loop — XML context, sub-agent dispatch, output parsing, convergence |
-| `session` | Per-run execution state store |
-| `driftguard` | Four-phase COMMIT → EXECUTE → RECONCILE → SUPERVISE pipeline for execution drift |
-| `hooks` | Lifecycle event hooks |
-| `identity` | Stable agent identity + advertised skills |
-| `skills` | `SKILL.md` loader for reusable capability bundles |
-| `packaging` | Signed agent bundle format (keygen / pack / verify / install) |
-| `replay` | Event-log replay for debugging and regression testing |
-| `config` | `agent.toml` loader (credentials + policy come from `agentkit`) |
+| [`workflow`](workflow/README.md) | landed |
+| [`workflow/security`](workflow/security) | landed |
+| `hooks`, `supervision`, `checkpoint`, `packaging`, `identity`, `config` | planned |
+
+The full package roster (purpose, origin, what was explicitly rejected) lives in [`docs/decisions.md`](docs/decisions.md) — that document is the durable source of truth.
+
+## Quickstart
+
+The `workflow` package is the entry point today. Briefly:
+
+```go
+import (
+    "github.com/vinayprograms/agentcore/workflow"
+    "github.com/vinayprograms/agentcore/workflow/security"
+    "github.com/vinayprograms/agentkit/llm"
+)
+
+model, _ := llm.New(llm.Config{Service: "anthropic", APIKey: apiKey})
+
+wf := workflow.New("daily-summary").
+    Input(workflow.Parameter{Name: "topic"}).
+    Add(workflow.Sequence("main").Steps(
+        workflow.Goal("draft", "Write a brief on $topic").WithOutputs("brief"),
+        workflow.Goal("review", "Check $brief for accuracy").Supervise(),
+    )).
+    Security(security.Default)
+
+state, err := wf.Execute(ctx, &workflow.Runtime{
+    Model:      model,
+    Supervisor: mySupervisor, // required when any node is Supervised
+}, map[string]string{"topic": "memory consistency models"})
+```
+
+See [`workflow/README.md`](workflow/README.md) for the full surface — composition rules, supervision pipeline, runtime customization, content-guard modes, validation rules, and the events emitted on `Runtime.Hooks`.
 
 ## Install
 
@@ -48,25 +69,22 @@ an existing working agent. Intended surface:
 go get github.com/vinayprograms/agentcore
 ```
 
-*(Installation will become meaningful once the first package lands.)*
-
 ## Design principles
 
 1. **Interface-driven at every seam.** Consumers program to interfaces;
-   concrete types are returned from constructors.
-2. **Testable by design.** If a piece of code is needed, it is testable.
-   Dependencies (clocks, randomness, I/O) are injected. Target: 100%
-   statement coverage.
-3. **Small, focused packages.** Each package has one purpose.
-4. **Composition over configuration.** Constructors take typed options,
-   not free-form maps.
+   concrete types are returned from constructors and otherwise unexported.
+2. **Independence by construction.** Composition deep-copies. State
+   from one execution cannot bleed into another.
+3. **Testable by design.** Dependencies (LLM, tools, MCP, supervisor,
+   checkpoint store, human channel) are injected via `Runtime`. Target:
+   100% statement coverage on testable code.
+4. **Small, focused packages.** Each package has one purpose.
 5. **No re-implementations.** If `agentkit` or `swarmkit` owns a concept,
    `agentcore` depends on it.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Changes are tracked in
-[CHANGELOG.md](CHANGELOG.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
