@@ -10,7 +10,7 @@ import (
 
 // runtime_test.go covers runtime.go: the Runtime / Override types, the merge
 // algebra (every Override field, parent-empty SystemContext branch, identity
-// path), and the Hooks fire helper.
+// path), and the Telemetry fire helper.
 
 func TestRuntime_MergeIdentityWhenAllZero(t *testing.T) {
 	parent := &Runtime{Model: &countingModel{}, SystemContext: "ctx"}
@@ -52,20 +52,20 @@ func TestRuntime_MergeSystemContextAppendsToExisting(t *testing.T) {
 	}
 }
 
-func TestRuntime_FireWithHooks(t *testing.T) {
-	hooks := &hookSink{}
-	rt := &Runtime{Model: &countingModel{}, Hooks: hooks}
+func TestRuntime_FireWithTelemetry(t *testing.T) {
+	sink := &recordingSink{}
+	rt := &Runtime{Model: &countingModel{}, Telemetry: sink}
 	g := Goal("g", "do it")
 	if err := g.Execute(context.Background(), rt, NewState(nil)); err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
-	if len(hooks.events) == 0 {
+	if len(sink.events) == 0 {
 		t.Errorf("expected lifecycle events to fire")
 	}
 }
 
-func TestRuntime_FireWithoutHooksIsNoOp(t *testing.T) {
-	rt := &Runtime{} // Hooks is nil
-	rt.fire(context.Background(), GoalStarted{Name: "g", Description: "d"})
+func TestRuntime_FireWithoutTelemetryIsNoOp(t *testing.T) {
+	rt := &Runtime{} // Telemetry is nil
+	rt.fire(context.Background(), GoalStarted{Goal: "g", Description: "d"})
 	// no panic, no observable effect — the assertion is "didn't crash."
 }

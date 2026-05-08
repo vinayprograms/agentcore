@@ -181,14 +181,14 @@ func TestWorkflow_BindRejectsDuplicateParameters(t *testing.T) {
 // Execute: events, error propagation, cancellation
 // ---------------------------------------------------------------------------
 
-func TestWorkflow_PreflightFailureFiresHook(t *testing.T) {
-	hooks := &hookSink{}
-	rt := &Runtime{Model: &countingModel{}, Hooks: hooks}
+func TestWorkflow_PreflightFailureFiresEvent(t *testing.T) {
+	sink := &recordingSink{}
+	rt := &Runtime{Model: &countingModel{}, Telemetry: sink}
 	wf := New("w").Add(Sequence("main").Steps(Goal("g", "use $missing")))
 	if _, err := wf.Execute(context.Background(), rt, nil); err == nil {
 		t.Fatal("expected preflight error")
 	}
-	for _, e := range hooks.events {
+	for _, e := range sink.events {
 		if _, ok := e.(PreflightFailed); ok {
 			return
 		}

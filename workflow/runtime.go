@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 
+	"github.com/vinayprograms/agentcore/observe"
 	"github.com/vinayprograms/agentkit/contentguard"
 	"github.com/vinayprograms/agentkit/llm"
 	"github.com/vinayprograms/agentkit/mcp"
@@ -60,9 +61,12 @@ type Runtime struct {
 	// after the package's default system message.
 	SystemContext string
 
-	// Hooks receives workflow events. Nil means events are silently dropped.
-	// The agentcore hooks package provides the canonical implementation.
-	Hooks EventSink
+	// Telemetry receives workflow events. Nil means events are silently
+	// dropped. The agentcore/observe package provides the canonical
+	// implementations: Logger (slog), Counter (OTel metrics), and
+	// NewHandlers (typed callbacks). Compose with observe.Tee. Tracing is
+	// emitted directly by this package via OTel — no sink wiring required.
+	Telemetry observe.EventSink
 
 	// Supervisor judges supervised steps' work. Required when any node in
 	// the workflow has Supervise() or SuperviseByHuman() set; nil is fine
@@ -84,16 +88,10 @@ type Runtime struct {
 	Debug bool
 }
 
-// EventSink receives workflow lifecycle events. Implementations must be
-// safe for concurrent use — Fire may be called from multiple goroutines.
-type EventSink interface {
-	Fire(ctx context.Context, event any)
-}
-
-// fire calls Hooks.Fire if Hooks is non-nil, otherwise is a no-op.
+// fire calls Telemetry.Fire if Telemetry is non-nil, otherwise is a no-op.
 func (rt *Runtime) fire(ctx context.Context, event any) {
-	if rt.Hooks != nil {
-		rt.Hooks.Fire(ctx, event)
+	if rt.Telemetry != nil {
+		rt.Telemetry.Fire(ctx, event)
 	}
 }
 
@@ -107,7 +105,7 @@ func (rt *Runtime) fire(ctx context.Context, event any) {
 // level can layer information for the LLM without erasing what the parent
 // already declared.
 //
-// Hooks, Guard, Debug, and SecurityScope are deliberately NOT in Override —
+// Telemetry, Guard, Debug, and SecurityScope are deliberately NOT in Override —
 // they are workflow-wide concerns (single sink for events, taint surface
 // across the whole run, run-wide debug flag) and have no per-node meaning.
 type Override struct {

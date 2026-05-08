@@ -19,7 +19,7 @@ primitives) and [`swarmkit`](https://github.com/vinayprograms/swarmkit)
   heartbeats, agent registry.
 - `agentcore` tells you **how the pieces typically fit together** — a
   composition-tree workflow runtime, supervision pipeline, content-guard
-  wiring, hooks, and packaging.
+  wiring, telemetry, and packaging.
 
 Pragmatic, not dogmatic. Agents are free to mix `agentcore`, `agentkit`,
 and `swarmkit` directly; `agentcore` never forces indirection.
@@ -30,13 +30,14 @@ and `swarmkit` directly; `agentcore` never forces indirection.
 |---|---|
 | [`workflow`](workflow/README.md) | landed |
 | [`workflow/security`](workflow/security) | landed |
-| `hooks`, `supervision`, `checkpoint`, `packaging`, `identity`, `config` | planned |
+| [`observe`](observe/README.md) | landed |
+| `supervision`, `checkpoint`, `packaging`, `identity`, `config` | planned |
 
 The full package roster (purpose, origin, what was explicitly rejected) lives in [`docs/decisions.md`](docs/decisions.md) — that document is the durable source of truth.
 
 ## Quickstart
 
-The `workflow` package is the entry point today. Briefly:
+The `workflow` package is the entry point today. A minimal workflow:
 
 ```go
 import (
@@ -51,17 +52,26 @@ wf := workflow.New("daily-summary").
     Input(workflow.Parameter{Name: "topic"}).
     Add(workflow.Sequence("main").Steps(
         workflow.Goal("draft", "Write a brief on $topic").WithOutputs("brief"),
-        workflow.Goal("review", "Check $brief for accuracy").Supervise(),
+        workflow.Goal("review", "Check $brief for accuracy"),
     )).
     Security(security.Default)
 
-state, err := wf.Execute(ctx, &workflow.Runtime{
-    Model:      model,
-    Supervisor: mySupervisor, // required when any node is Supervised
-}, map[string]string{"topic": "memory consistency models"})
+state, err := wf.Execute(ctx, &workflow.Runtime{Model: model},
+    map[string]string{"topic": "memory consistency models"})
 ```
 
-See [`workflow/README.md`](workflow/README.md) for the full surface — composition rules, supervision pipeline, runtime customization, content-guard modes, validation rules, and the events emitted on `Runtime.Hooks`.
+To wire telemetry, add a sink from the `observe` package:
+
+```go
+rt := &workflow.Runtime{
+    Model:     model,
+    Telemetry: observe.Logger(slog.Default()), // logs every event to slog
+}
+```
+
+OTel tracing is emitted automatically by the workflow package whenever a `TracerProvider` is wired. No sink configuration needed for spans — just set up your OTel provider as you would for any other Go program.
+
+To supervise a goal, mark it with `.Supervise()` (or `.SuperviseByHuman()`) and provide a `Runtime.Supervisor`. See [`workflow/README.md`](workflow/README.md) for the full surface — composition rules, supervision pipeline, runtime customization, content-guard modes, validation rules, and the events emitted on `Runtime.Telemetry`.
 
 ## Install
 

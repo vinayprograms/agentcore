@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/vinayprograms/agentkit/llm"
 )
 
@@ -133,10 +135,14 @@ func (g *goal) clone() Step {
 
 // Execute runs the goal: interpolates the description, runs the agentic loop
 // (or fan-out + synthesis), parses structured outputs, and stores results.
-func (g *goal) Execute(ctx context.Context, rt *Runtime, state *State) error {
-	if err := g.Validate(); err != nil {
+func (g *goal) Execute(ctx context.Context, rt *Runtime, state *State) (err error) {
+	if err = g.Validate(); err != nil {
 		return err
 	}
+
+	ctx, end := trace(ctx, "goal.execute", attribute.String("goal", g.name))
+	defer end(&err)
+
 	// Apply this goal's overrides on top of the parent's runtime; the
 	// merged runtime is what the goal's loop, fan-out, and synthesis use,
 	// and is what flows into any child agents or nested goals/convergences.
@@ -144,7 +150,7 @@ func (g *goal) Execute(ctx context.Context, rt *Runtime, state *State) error {
 
 	description := state.interpolate(g.description)
 	ctx = context.WithValue(ctx, ctxGoal, description)
-	rt.fire(ctx, GoalStarted{Name: g.name, Description: description})
+	rt.fire(ctx, GoalStarted{Goal: g.name, Description: description})
 
 	mode := effectiveSupervision(ctx, g.supervision)
 
@@ -170,7 +176,7 @@ func (g *goal) Execute(ctx context.Context, rt *Runtime, state *State) error {
 	}
 	state.Outputs[g.name] = output
 
-	rt.fire(ctx, GoalEnded{Name: g.name, Output: output})
+	rt.fire(ctx, GoalEnded{Goal: g.name, Output: output})
 	return nil
 }
 
@@ -229,11 +235,11 @@ func (g *goal) fanOut(ctx context.Context, rt *Runtime, state *State, descriptio
 			}
 			child := state.fork()
 			name := stepName(invocation)
-			rt.fire(ctx, SubagentSpawned{GoalName: g.name, AgentName: name})
+			rt.fire(ctx, SubagentSpawned{Goal: g.name, Agent: name})
 			err := invocation.Execute(ctx, rt, child)
 			out := child.Outputs[name]
 			rt.fire(ctx, SubagentCompleted{
-				GoalName: g.name, AgentName: name, Output: out, Err: err,
+				Goal: g.name, Agent: name, Output: out, Failure: err,
 			})
 			ch <- agentOut{name: name, output: out, err: err}
 		}(step)

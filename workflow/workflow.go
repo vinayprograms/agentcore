@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/vinayprograms/agentcore/workflow/security"
 )
 
@@ -107,28 +109,32 @@ func (w *workflow) Children() []Node {
 // If the workflow declared a security mode and rt.Guard is nil, Execute
 // builds a content guard from the declared mode/scope using rt.Model. The
 // caller's *env is never mutated — execution uses a derived shallow copy.
-func (w *workflow) Execute(ctx context.Context, rt *Runtime, inputs map[string]string) (*State, error) {
-	state, err := w.bind(inputs)
+func (w *workflow) Execute(ctx context.Context, rt *Runtime, inputs map[string]string) (state *State, err error) {
+	state, err = w.bind(inputs)
 	if err != nil {
 		return nil, err
 	}
 
 	if err := Validate(w, rt); err != nil {
-		rt.fire(ctx, PreflightFailed{Workflow: w.name, Err: err})
+		rt.fire(ctx, PreflightFailed{Workflow: w.name, Failure: err})
 		return nil, fmt.Errorf("preflight: %w", err)
 	}
 
+	ctx, end := trace(ctx, "workflow.run", attribute.String("workflow", w.name))
+	defer end(&err)
+
 	runEnv := *rt
 	if w.securityRequired && runEnv.Guard == nil {
-		guard, err := security.Build(w.securityMode, w.securityScope, runEnv.Model)
-		if err != nil {
-			return nil, fmt.Errorf("build content guard: %w", err)
+		guard, buildErr := security.Build(w.securityMode, w.securityScope, runEnv.Model)
+		if buildErr != nil {
+			err = fmt.Errorf("build content guard: %w", buildErr)
+			return nil, err
 		}
 		runEnv.Guard = guard
 		defer guard.Close()
 	}
 
-	runEnv.fire(ctx, WorkflowStarted{Name: w.name})
+	runEnv.fire(ctx, WorkflowStarted{Workflow: w.name})
 
 	// Seed the supervision context with the workflow-level mode. Sequences,
 	// goals, and convergences read this and either inherit or override.
@@ -140,15 +146,16 @@ func (w *workflow) Execute(ctx context.Context, rt *Runtime, inputs map[string]s
 			execErr = ctxErr
 			break
 		}
-		if err := r.Execute(ctx, &runEnv, state); err != nil {
-			execErr = err
+		if stepErr := r.Execute(ctx, &runEnv, state); stepErr != nil {
+			execErr = stepErr
 			break
 		}
 	}
 
-	runEnv.fire(ctx, WorkflowEnded{Name: w.name, Err: execErr})
+	runEnv.fire(ctx, WorkflowEnded{Workflow: w.name, Failure: execErr})
 	if execErr != nil {
-		return nil, execErr
+		err = execErr
+		return nil, err
 	}
 	return state, nil
 }

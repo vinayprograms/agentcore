@@ -185,13 +185,15 @@ var (
 	_ Node = (*envCapture)(nil)
 )
 
-// hookSink records every workflow event for later assertion.
-type hookSink struct {
+// recordingSink records every workflow event for later assertion. Used
+// by tests that want to observe what a Runtime emitted without wiring a
+// real telemetry sink.
+type recordingSink struct {
 	events []any
 }
 
-func (h *hookSink) Fire(ctx context.Context, event any) {
-	h.events = append(h.events, event)
+func (r *recordingSink) Fire(ctx context.Context, event any) {
+	r.events = append(r.events, event)
 }
 
 // ---------------------------------------------------------------------------

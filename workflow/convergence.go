@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/vinayprograms/agentkit/llm"
 )
 
@@ -139,16 +141,22 @@ func (c *convergence) clone() Step {
 
 // Execute runs the convergence loop and writes the final output (and optional
 // structured fields) into state.
-func (c *convergence) Execute(ctx context.Context, rt *Runtime, state *State) error {
-	if err := c.Validate(); err != nil {
+func (c *convergence) Execute(ctx context.Context, rt *Runtime, state *State) (err error) {
+	if err = c.Validate(); err != nil {
 		return err
 	}
+
+	ctx, end := trace(ctx, "convergence.execute",
+		attribute.String("convergence", c.name),
+		attribute.Int("within", c.within))
+	defer end(&err)
+
 	// Apply this convergence's overrides on top of the parent's runtime.
 	rt = rt.merge(c.override)
 
 	description := state.interpolate(c.description)
 	ctx = context.WithValue(ctx, ctxGoal, description)
-	rt.fire(ctx, GoalStarted{Name: c.name, Description: description})
+	rt.fire(ctx, GoalStarted{Goal: c.name, Description: description})
 
 	mode := effectiveSupervision(ctx, c.supervision)
 
@@ -174,7 +182,7 @@ func (c *convergence) Execute(ctx context.Context, rt *Runtime, state *State) er
 	}
 	state.Outputs[c.name] = output
 
-	rt.fire(ctx, GoalEnded{Name: c.name, Output: output})
+	rt.fire(ctx, GoalEnded{Goal: c.name, Output: output})
 	return nil
 }
 
@@ -206,9 +214,9 @@ func (c *convergence) run(ctx context.Context, rt *Runtime, state *State, descri
 	}
 
 	rt.fire(ctx, ConvergenceCapReached{
-		Name:       c.name,
-		Cap:        c.within,
-		LastOutput: lastSubstantive,
+		Convergence: c.name,
+		Cap:         c.within,
+		LastOutput:  lastSubstantive,
 	})
 	state.Failures[c.name] = c.within
 	return lastSubstantive, nil

@@ -363,7 +363,7 @@ rt := &workflow.Runtime{
     MCP:             mcpManager,      // optional — any workflow.MCPManager (e.g. *mcp.Manager)
     Policy:          policyLookup,    // optional
     Guard:           contentGuard,    // optional (auto-built when .Security() declared)
-    Hooks:           eventSink,       // optional
+    Telemetry:       eventSink,       // optional — see agentcore/observe
     SystemContext:   "...",           // appended to system prompt on every call
     Supervisor:      mySupervisor,    // required when any node is Supervised
     CheckpointStore: myStore,         // optional persistence for the four checkpoint records
@@ -399,7 +399,7 @@ memUpdate := workflow.Goal("update_memory",
     })
 ```
 
-The `memUpdate` goal sees the workflow's `Model`, `MCP`, `Policy`, `Hooks`, `Guard` etc. as inherited, but its `Tools` becomes `memReg` and its system prompt has the workflow's `SystemContext` plus the goal's restriction note appended.
+The `memUpdate` goal sees the workflow's `Model`, `MCP`, `Policy`, `Telemetry`, `Guard` etc. as inherited, but its `Tools` becomes `memReg` and its system prompt has the workflow's `SystemContext` plus the goal's restriction note appended.
 
 **Inheritance model.** Each step's `Execute` merges its own `Override` on top of the parent runtime it was given, then passes the merged runtime to its children:
 
@@ -412,7 +412,7 @@ Workflow.Execute (rt = workflow.runtime)
 
 At every level, fields the override leaves zero/nil inherit from above; non-zero fields replace. `SystemContext` is the only append-not-replace field — each level layers its content on top of what the parent already declared.
 
-**What's NOT in `Override` (and why).** `Hooks`, `Guard`, `Debug`, `Supervisor`, `CheckpointStore`, and `HumanCh` are workflow-wide concerns — a single event sink, a single taint surface across the run, a single debug flag, a single supervision policy and human-handoff channel. Allowing per-node overrides would split observability, security, and supervision guarantees, so those fields stay on `Runtime` only.
+**What's NOT in `Override` (and why).** `Telemetry`, `Guard`, `Debug`, `Supervisor`, `CheckpointStore`, and `HumanCh` are workflow-wide concerns — a single event sink, a single taint surface across the run, a single debug flag, a single supervision policy and human-handoff channel. Allowing per-node overrides would split observability, security, and supervision guarantees, so those fields stay on `Runtime` only.
 
 **Multiple `Customize` calls replace.** Calling `.Customize(...)` twice on the same step replaces the previous override — compose multiple customizations into a single `Override{...}` literal rather than chaining multiple calls.
 
@@ -453,13 +453,34 @@ type CheckpointStore interface {
 
 `Validate` enforces wiring: any node with `Supervise()` requires `Runtime.Supervisor`; any node with `SuperviseByHuman()` additionally requires `Runtime.HumanCh`. `CheckpointStore` is optional — a nil store skips persistence.
 
+A minimal `Supervisor` that always continues:
+
+```go
+type permissive struct{}
+
+func (permissive) Reconcile(pre *workflow.PreCheckpoint, post *workflow.PostCheckpoint) *workflow.ReconcileResult {
+    return &workflow.ReconcileResult{StepID: pre.StepID, Escalate: false}
+}
+
+func (permissive) Supervise(ctx context.Context, req workflow.SuperviseRequest) (*workflow.SuperviseResult, error) {
+    return &workflow.SuperviseResult{Verdict: workflow.VerdictContinue}, nil
+}
+
+rt := &workflow.Runtime{
+    Model:      m,
+    Supervisor: permissive{},
+}
+```
+
+A real `Supervisor` compares pre vs. post in `Reconcile` to decide whether drift occurred (set `Escalate: true` and populate `Triggers`), and uses an LLM (or a human) inside `Supervise` to render a `Verdict`. There is no default implementation today — write your own against this two-method interface.
+
 Supervision propagates through the tree via context: a workflow- or sequence-level `Supervise()` flows into nested goals/convergences unless they declare a different mode of their own. Agents inherit their parent goal/convergence's supervision automatically (they have no `Supervise` setter — supervision belongs to the unit of declared work, not to a sub-agent).
 
 The COMMIT and POST phases degrade gracefully on model errors or malformed JSON: the checkpoints are still produced (with low-confidence defaults and a recorded failure assumption) so RECONCILE always runs against meaningful inputs.
 
 ## Events
 
-`Runtime.Hooks` (if set) receives these events:
+`Runtime.Telemetry` (if set) receives these events:
 
 | Event | When |
 |---|---|
@@ -472,7 +493,51 @@ The COMMIT and POST phases degrade gracefully on model errors or malformed JSON:
 | `ConvergenceCapReached` | Convergence hits its `within` without converging |
 | `PreflightFailed` | `Validate` rejects the workflow |
 
-The `agentcore/hooks` package provides the canonical `EventSink` implementation.
+Every event satisfies the `observe.Event` interface (`agentcore/observe`):
+
+```go
+type Event interface {
+    Name() string       // stable identifier, e.g. "goal.started"
+    Level() slog.Level  // slog.LevelInfo / Warn / Error
+    Attrs() []slog.Attr // structured fields, type-safe at construction
+    Err() error         // nil unless the event represents a failure
+}
+```
+
+Sinks dispatch generically — a custom sink reads `Name`, `Level`, `Attrs`, and `Err` and never needs a type switch. New event types added here flow through every sink automatically.
+
+The `agentcore/observe` package provides drop-in `EventSink` implementations today: `Logger` (slog), `Counter` (OTel metrics), and `NewHandlers` (typed-callback registry). Compose with `observe.Tee`.
+
+## Tracing
+
+Tracing is emitted automatically by this package via OpenTelemetry — no consumer wiring needed at the sink layer. Each `Workflow.Execute`, `Sequence.Execute`, `Goal.Execute`, `Convergence.Execute`, and `Agent.Execute` opens a span, records errors via `RecordError` / `SetStatus(Error)`, and ends it. The span hierarchy mirrors the composition tree.
+
+Without an OTel TracerProvider configured, every span goes to OTel's no-op default and is silently discarded — zero overhead, zero noise.
+
+To capture spans locally (no collector required):
+
+```go
+import (
+    "go.opentelemetry.io/otel"
+    "go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
+    "go.opentelemetry.io/otel/sdk/trace"
+)
+
+exp, _ := stdouttrace.New(stdouttrace.WithWriter(os.Stderr))
+otel.SetTracerProvider(trace.NewTracerProvider(trace.WithBatcher(exp)))
+```
+
+To wrap a workflow run in a parent span (for higher-level context like a user-request ID):
+
+```go
+ctx, span := otel.Tracer("agent").Start(ctx, "user.request",
+    attribute.String("request_id", reqID))
+defer span.End()
+
+state, err := wf.Execute(ctx, rt, inputs)
+```
+
+The workflow's spans become children of the user's span automatically via OTel context propagation. agentkit's per-LLM-call spans (`llm.chat`) and contentguard checks become deeper children inside the goal span that triggered them. The full trace tree falls out for free.
 
 ## Validate
 

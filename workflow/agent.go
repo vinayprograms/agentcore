@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/vinayprograms/agentkit/llm"
 )
 
@@ -124,15 +126,18 @@ func (a *agent) clone() Step {
 //
 //	critic := workflow.Agent("critic", "You are a rigorous critic.")
 //	err := critic.Task("review this draft").Execute(ctx, rt, state)
-func (a *agent) Execute(ctx context.Context, rt *Runtime, state *State) error {
+func (a *agent) Execute(ctx context.Context, rt *Runtime, state *State) (err error) {
 	// Structural validation: name, prompt, output declarations.
-	if err := a.Validate(); err != nil {
+	if err = a.Validate(); err != nil {
 		return err
 	}
 	// Per-invocation precondition: task must have been set via .Task().
 	if strings.TrimSpace(a.task) == "" {
 		return fmt.Errorf("agent %s: task is required (call .Task() before .Execute())", a.name)
 	}
+
+	ctx, end := trace(ctx, "agent.execute", attribute.String("agent", a.name))
+	defer end(&err)
 
 	// Apply this agent's overrides on top of the parent's runtime.
 	rt = rt.merge(a.override)
@@ -152,12 +157,13 @@ func (a *agent) Execute(ctx context.Context, rt *Runtime, state *State) error {
 	toolDefs := allToolDefs(rt)
 
 	for {
-		resp, err := rt.Model.Chat(ctx, llm.ChatRequest{
+		resp, chatErr := rt.Model.Chat(ctx, llm.ChatRequest{
 			Messages: messages,
 			Tools:    toolDefs,
 		})
-		if err != nil {
-			return fmt.Errorf("agent %s: %w", a.name, err)
+		if chatErr != nil {
+			err = fmt.Errorf("agent %s: %w", a.name, chatErr)
+			return err
 		}
 		if len(resp.ToolCalls) == 0 {
 			state.Outputs[a.name] = resp.Content
@@ -168,9 +174,10 @@ func (a *agent) Execute(ctx context.Context, rt *Runtime, state *State) error {
 			Content:   resp.Content,
 			ToolCalls: resp.ToolCalls,
 		})
-		results, err := runTools(ctx, rt, resp.ToolCalls)
-		if err != nil {
-			return fmt.Errorf("agent %s: %w", a.name, err)
+		results, toolErr := runTools(ctx, rt, resp.ToolCalls)
+		if toolErr != nil {
+			err = fmt.Errorf("agent %s: %w", a.name, toolErr)
+			return err
 		}
 		messages = append(messages, results...)
 	}

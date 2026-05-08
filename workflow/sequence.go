@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // sequence is an ordered block of Steps. Implements Node but not Step — it
@@ -116,10 +118,14 @@ func (seq *sequence) clone() *sequence {
 // State binding (resolving inputs / defaults) is the workflow's job. When
 // invoking a sequence standalone, the caller supplies whatever State the
 // sequence's steps will read from.
-func (seq *sequence) Execute(ctx context.Context, rt *Runtime, state *State) error {
-	if err := seq.Validate(); err != nil {
+func (seq *sequence) Execute(ctx context.Context, rt *Runtime, state *State) (err error) {
+	if err = seq.Validate(); err != nil {
 		return err
 	}
+
+	ctx, end := trace(ctx, "sequence.run", attribute.String("sequence", seq.name))
+	defer end(&err)
+
 	// Apply this sequence's overrides on top of the parent's runtime; each
 	// step inside the sequence sees this merged runtime as its parent.
 	rt = rt.merge(seq.override)
@@ -129,10 +135,10 @@ func (seq *sequence) Execute(ctx context.Context, rt *Runtime, state *State) err
 	ctx = context.WithValue(ctx, ctxSupervision, effectiveSupervision(ctx, seq.supervision))
 
 	for _, step := range seq.steps {
-		if err := ctx.Err(); err != nil {
+		if err = ctx.Err(); err != nil {
 			return err
 		}
-		if err := step.Execute(ctx, rt, state); err != nil {
+		if err = step.Execute(ctx, rt, state); err != nil {
 			return err
 		}
 	}
