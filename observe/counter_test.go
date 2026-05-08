@@ -123,10 +123,11 @@ func TestCounter_LevelStringMaps(t *testing.T) {
 	reader, mp := newCountingMeter(t)
 	sink := Counter(mp.Meter("test"))
 
-	sink.Fire(context.Background(), fakeWarn{id: "x"})       // warn
-	sink.Fire(context.Background(), fakeFailure{id: "y"})    // error
-	sink.Fire(context.Background(), fakeLifecycle{id: "z"})  // info
-	sink.Fire(context.Background(), fakeDebug{id: "d"})      // debug
+	sink.Fire(context.Background(), fakeWarn{id: "x"})         // warn
+	sink.Fire(context.Background(), fakeFailure{id: "y"})      // error
+	sink.Fire(context.Background(), fakeLifecycle{id: "z"})    // info
+	sink.Fire(context.Background(), fakeDebug{id: "d"})        // debug
+	sink.Fire(context.Background(), fakeOddLevel{id: "o"})     // out-of-band → "error"
 
 	rm := collect(t, reader)
 	for _, want := range []struct {
@@ -136,6 +137,7 @@ func TestCounter_LevelStringMaps(t *testing.T) {
 		{"agentcore.fake.failure", "error"},
 		{"agentcore.fake.lifecycle", "info"},
 		{"agentcore.fake.debug", "debug"},
+		{"agentcore.fake.oddlevel", "error"},
 	} {
 		points := findCounter(t, rm, want.metric)
 		if len(points) != 1 {

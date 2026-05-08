@@ -48,6 +48,16 @@ func (e fakeDebug) Level() slog.Level  { return slog.LevelDebug }
 func (e fakeDebug) Attrs() []slog.Attr { return []slog.Attr{slog.String("id", e.id)} }
 func (e fakeDebug) Err() error         { return nil }
 
+// fakeOddLevel reports a level that isn't one of slog's four named values.
+// Exercises the default-case mapping in counter.levelString — anything
+// out-of-band reports as "error" so it surfaces loudly.
+type fakeOddLevel struct{ id string }
+
+func (e fakeOddLevel) Name() string       { return "fake.oddlevel" }
+func (e fakeOddLevel) Level() slog.Level  { return slog.Level(2) } // between Info and Warn
+func (e fakeOddLevel) Attrs() []slog.Attr { return []slog.Attr{slog.String("id", e.id)} }
+func (e fakeOddLevel) Err() error         { return nil }
+
 // captureLogger returns a slog.Logger that writes JSON records to a buffer
 // and the buffer itself for inspection.
 func captureLogger() (*slog.Logger, *bytes.Buffer) {

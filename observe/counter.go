@@ -2,6 +2,7 @@ package observe
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -77,17 +78,20 @@ func (c *counter) instrumentFor(eventName string) metric.Int64Counter {
 	return actual.(metric.Int64Counter)
 }
 
-// levelString reduces slog.Level to one of "debug" / "info" / "warn" /
+// levelString maps slog.Level to one of "debug" / "info" / "warn" /
 // "error" — coarse enough to stay low-cardinality in metric labels.
-// slog's standard levels are -4 (Debug), 0 (Info), 4 (Warn), 8 (Error).
+// Anything outside slog's four named levels is reported as "error" so
+// out-of-band values surface loudly rather than silently miscategorise.
 func levelString(e Event) string {
-	switch l := e.Level(); {
-	case l < 0:
+	switch e.Level() {
+	case slog.LevelDebug:
 		return "debug"
-	case l < 4:
+	case slog.LevelInfo:
 		return "info"
-	case l < 8:
+	case slog.LevelWarn:
 		return "warn"
+	case slog.LevelError:
+		return "error"
 	default:
 		return "error"
 	}
