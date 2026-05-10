@@ -31,7 +31,8 @@ and `swarmkit` directly; `agentcore` never forces indirection.
 | [`workflow`](workflow/README.md) | landed |
 | [`workflow/security`](workflow/security) | landed |
 | [`observe`](observe/README.md) | landed |
-| `supervision`, `checkpoint`, `packaging`, `identity`, `config` | planned |
+| [`supervise`](supervise/README.md) | landed |
+| `packaging`, `identity`, `config` | planned |
 
 The full package roster (purpose, origin, what was explicitly rejected) lives in [`docs/decisions.md`](docs/decisions.md) — that document is the durable source of truth.
 
@@ -71,7 +72,7 @@ rt := &workflow.Runtime{
 
 OTel tracing is emitted automatically by the workflow package whenever a `TracerProvider` is wired. No sink configuration needed for spans — just set up your OTel provider as you would for any other Go program.
 
-To supervise a goal, mark it with `.Supervise()` (or `.SuperviseByHuman()`) and provide a `Runtime.Supervisor`. See [`workflow/README.md`](workflow/README.md) for the full surface — composition rules, supervision pipeline, runtime customization, content-guard modes, validation rules, and the events emitted on `Runtime.Telemetry`.
+To supervise a goal, mark it with `.Supervise()` (or `.SuperviseByHuman()`), wire a `Runtime.Supervisor` (e.g., `supervise.New(supervise.Config{})`), and optionally set `Runtime.MaxReorientAttempts`. See [`workflow/README.md`](workflow/README.md) for the full surface.
 
 ## Install
 
@@ -86,7 +87,7 @@ go get github.com/vinayprograms/agentcore
 2. **Independence by construction.** Composition deep-copies. State
    from one execution cannot bleed into another.
 3. **Testable by design.** Dependencies (LLM, tools, MCP, supervisor,
-   checkpoint store, human channel) are injected via `Runtime`. Target:
+   human channel) are injected via `Runtime`. Target:
    100% statement coverage on testable code.
 4. **Small, focused packages.** Each package has one purpose.
 5. **No re-implementations.** If `agentkit` or `swarmkit` owns a concept,
