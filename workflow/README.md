@@ -418,42 +418,38 @@ At every level, fields the override leaves zero/nil inherit from above; non-zero
 
 ## Supervision
 
-Any node — workflow, sequence, goal, or convergence — may be marked `Supervise()` (LLM-driven) or `SuperviseByHuman()` (LLM-driven plus human approval on pause). A supervised step runs through a four-phase pipeline that wraps its underlying execution:
+Any node — workflow, sequence, goal, or convergence — may be marked `Supervise()` (LLM-driven) or `SuperviseByHuman()` (LLM-driven plus human approval). A supervised step runs through a five-phase pipeline that wraps its underlying execution:
 
 ```
 COMMIT     LLM declares intent (PreCheckpoint)        ─ uses rt.Model
 EXECUTE    the step's actual work runs
 POST       LLM self-assesses the work (PostCheckpoint) ─ uses rt.Model
 RECONCILE  rt.Supervisor compares pre vs. post → triggers + escalate flag
-SUPERVISE  rt.Supervisor renders a Verdict           ─ skipped when no triggers
+SUPERVISE  rt.Supervisor renders a Verdict           ─ skipped when clean
                                                        AND not human-required
 ```
 
-Verdicts:
+COMMIT, EXECUTE, and POST are the agent's internal process — they use the agent's model and are fixed behavior. RECONCILE and SUPERVISE are the **evaluation layer**, swappable through a two-method interface so consumers can plug in different judgment policies (strict vs lenient, metrics-only, human-only, tiered models, external review service).
 
-- `VerdictContinue` — return the EXECUTE output as-is.
-- `VerdictReorient` — re-run EXECUTE once with the supervisor's correction prepended to the instruction.
-- `VerdictPause` — for human-required nodes, send the supervisor's question on `Runtime.HumanCh` and wait for a response. A non-empty response is treated as an approval (used as a correction, then EXECUTE re-runs). A whitespace-only response, a closed channel, or context cancellation aborts the step. For LLM-only nodes, Pause is reported as an error.
-
-The pipeline integrates the consumer's policy through two interfaces, both wired on `Runtime`:
+The pipeline integrates the consumer's policy through one interface on `Runtime`:
 
 ```go
 type Supervisor interface {
     Reconcile(pre *PreCheckpoint, post *PostCheckpoint) *ReconcileResult
     Supervise(ctx context.Context, req SuperviseRequest) (*SuperviseResult, error)
 }
-
-type CheckpointStore interface {
-    SavePre(*PreCheckpoint) error
-    SavePost(*PostCheckpoint) error
-    SaveReconcile(*ReconcileResult) error
-    SaveSupervise(*SuperviseResult) error
-}
 ```
 
-`Validate` enforces wiring: any node with `Supervise()` requires `Runtime.Supervisor`; any node with `SuperviseByHuman()` additionally requires `Runtime.HumanCh`. `CheckpointStore` is optional — a nil store skips persistence.
+`Validate` enforces wiring: any node with `Supervise()` requires `Runtime.Supervisor`; any node with `SuperviseByHuman()` additionally requires `Runtime.HumanCh`.
 
-A minimal `Supervisor` that always continues:
+Verdicts:
+
+- `VerdictContinue` — return the EXECUTE output as-is.
+- `VerdictReorient` — re-run EXECUTE with the supervisor's correction prepended. Bounded by `Runtime.MaxReorientAttempts` (default 1). On exhaustion, escalates to AskHuman (if `HumanCh` is wired) or Halt.
+- `VerdictAskHuman` — send the supervisor's question on `Runtime.HumanCh`. A non-empty human response becomes a correction and EXECUTE re-runs. Whitespace-only, closed channel, or cancellation → Halt. byHuman steps route here directly after RECONCILE — LLM-SUPERVISE is skipped entirely.
+- `VerdictHalt` — terminate with the supervisor's reason.
+
+The `agentcore/supervise` package provides a default implementation (`supervise.New(supervise.Config{Model: ...})`). A minimal alternative that always continues:
 
 ```go
 type permissive struct{}

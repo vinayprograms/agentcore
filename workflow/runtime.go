@@ -73,15 +73,12 @@ type Runtime struct {
 	// when no node is supervised. Validate enforces this.
 	Supervisor Supervisor
 
-	// CheckpointStore persists the four checkpoint records produced by the
-	// supervision pipeline. Optional — nil means "don't persist."
-	CheckpointStore CheckpointStore
+	// MaxReorientAttempts is the per-step limit on VerdictReorient retries.
+	// When exhausted, the pipeline escalates to AskHuman (if HumanCh is wired)
+	// or Halt. Default 1 when zero or unset.
+	MaxReorientAttempts int
 
-	// HumanCh is a bidirectional channel used when a step set
-	// SuperviseByHuman() and the supervisor returned VerdictPause. The
-	// pipeline sends the supervisor's question on the channel and reads
-	// the human's response. Required when any node has SuperviseByHuman();
-	// Validate enforces this.
+	// HumanCh is the channel used when a step set SuperviseByHuman() or the
 	HumanCh chan string
 
 	// Debug enables verbose logging of prompts and responses.

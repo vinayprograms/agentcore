@@ -30,7 +30,8 @@ type Verdict string
 const (
 	VerdictContinue Verdict = "continue"
 	VerdictReorient Verdict = "reorient"
-	VerdictPause    Verdict = "pause"
+	VerdictAskHuman Verdict = "ask_human"
+	VerdictHalt     Verdict = "halt"
 )
 
 // PreCheckpoint records the agent's stated intent before EXECUTE runs.
@@ -43,7 +44,6 @@ type PreCheckpoint struct {
 	ScopeIn         []string
 	ScopeOut        []string
 	Approach        string
-	ToolsPlanned    []string
 	PredictedOutput string
 	Confidence      string
 	Assumptions     []string
@@ -55,7 +55,6 @@ type PreCheckpoint struct {
 type PostCheckpoint struct {
 	StepID        string
 	ActualOutput  string
-	ToolsUsed     []string
 	MetCommitment bool
 	Deviations    []string
 	Concerns      []string
@@ -77,14 +76,16 @@ type SuperviseRequest struct {
 	Post          *PostCheckpoint
 	Triggers      []string
 	HumanRequired bool
+	Model         llm.Model // fallback model; used when no dedicated supervisor model is configured
 }
 
 // SuperviseResult is the verdict and any correction/question.
 type SuperviseResult struct {
 	StepID     string
 	Verdict    Verdict
-	Correction string // populated when Verdict == Reorient
-	Question   string // populated when Verdict == Pause and human approval is needed
+	Correction string // populated when Verdict == Reorient or AskHuman
+	Question   string // populated when Verdict == AskHuman; sent to human for approval
+	Reason     string // populated when Verdict == Halt; explains why execution stopped
 }
 
 // Supervisor is the consumer-supplied policy that judges a step's work.
@@ -92,15 +93,6 @@ type SuperviseResult struct {
 type Supervisor interface {
 	Reconcile(pre *PreCheckpoint, post *PostCheckpoint) *ReconcileResult
 	Supervise(ctx context.Context, req SuperviseRequest) (*SuperviseResult, error)
-}
-
-// CheckpointStore is consumer-supplied persistence for the four checkpoint
-// records produced by the pipeline. A nil store means "don't persist."
-type CheckpointStore interface {
-	SavePre(*PreCheckpoint) error
-	SavePost(*PostCheckpoint) error
-	SaveReconcile(*ReconcileResult) error
-	SaveSupervise(*SuperviseResult) error
 }
 
 // ----- Pipeline orchestration ------------------------------------------------
@@ -120,9 +112,16 @@ type CheckpointStore interface {
 //
 //	Continue → return output as-is
 //	Reorient → re-run execute() once with the correction prepended to the instruction
-//	Pause    → if SuperviseByHuman + Runtime.HumanCh wired, dispatch Question and
-//	           treat a non-empty response as approval (uses response as correction
-//	           and re-runs execute). Otherwise, returns an error.
+//	AskHuman → send Question on HumanCh; treat non-empty response as approval
+//	           (response becomes correction, execute re-runs). Empty/closed/
+//	           cancelled → Halt.
+//	Halt     → fail the step with the supervisor's Reason.
+//
+// Reorient is bounded by rt.MaxReorientAttempts (default 1, if zero).
+// Exhaustion → AskHuman (if HumanCh wired) else Halt.
+//
+// byHuman steps skip the LLM-SUPERVISE call entirely: after RECONCILE, they
+// route straight to askHuman with the reconcile triggers as context.
 func runWithSupervision(
 	ctx context.Context,
 	rt *Runtime,
@@ -137,78 +136,111 @@ func runWithSupervision(
 
 	// COMMIT
 	pre := runCommitPhase(ctx, rt, stepID, stepKind, instruction)
-	if rt.CheckpointStore != nil {
-		_ = rt.CheckpointStore.SavePre(pre)
-	}
 
 	// EXECUTE
-	output, toolsUsed, err := execute(ctx, instruction)
+	output, _, err := execute(ctx, instruction)
 	if err != nil {
 		return "", err
 	}
 
 	// POST
-	post := runPostPhase(ctx, rt, pre, output, toolsUsed)
-	if rt.CheckpointStore != nil {
-		_ = rt.CheckpointStore.SavePost(post)
-	}
+	post := runPostPhase(ctx, rt, pre, output)
 
 	// RECONCILE
 	reconcile := rt.Supervisor.Reconcile(pre, post)
-	if rt.CheckpointStore != nil {
-		_ = rt.CheckpointStore.SaveReconcile(reconcile)
+
+	// byHuman: skip LLM-SUPERVISE, route straight to human handshake.
+	if mode == byHuman {
+		q := "Supervision triggers: " + strings.Join(reconcile.Triggers, ", ")
+		if q == "Supervision triggers: " {
+			q = "Review this step's output."
+		}
+		return askHuman(ctx, rt, stepID, stepKind, instruction,
+			&SuperviseResult{Verdict: VerdictAskHuman, Question: q}, execute)
 	}
 
-	humanRequired := mode == byHuman
-	// Cost-saving short-circuit: skip SUPERVISE when no drift AND no human
-	// approval is required for this step.
-	if !reconcile.Escalate && !humanRequired {
+	// Cost-saving short-circuit: skip SUPERVISE when no drift.
+	if !reconcile.Escalate {
 		return output, nil
 	}
 
-	// SUPERVISE
-	result, err := rt.Supervisor.Supervise(ctx, SuperviseRequest{
-		OriginalGoal:  instruction,
-		Pre:           pre,
-		Post:          post,
-		Triggers:      reconcile.Triggers,
-		HumanRequired: humanRequired,
-	})
-	if err != nil {
-		return "", fmt.Errorf("%s %s: supervise phase: %w", stepKind, stepID, err)
-	}
-	if rt.CheckpointStore != nil {
-		_ = rt.CheckpointStore.SaveSupervise(result)
+	// Build the supervise request once; reused across reorient attempts.
+	req := SuperviseRequest{
+		OriginalGoal: instruction,
+		Pre:          pre,
+		Post:         post,
+		Triggers:     reconcile.Triggers,
+		Model:        rt.Model,
 	}
 
-	switch result.Verdict {
-	case VerdictContinue:
-		return output, nil
+	max := rt.MaxReorientAttempts
+	if max <= 0 {
+		max = 1 // default
+	}
+	for attempt := 0; ; attempt++ {
+		result, err := rt.Supervisor.Supervise(ctx, req)
+		if err != nil {
+			return "", fmt.Errorf("%s %s: supervise phase: %w", stepKind, stepID, err)
+		}
 
-	case VerdictReorient:
-		corrected := instruction + "\n\nSupervisor correction: " + result.Correction
+		switch result.Verdict {
+		case VerdictContinue:
+			return output, nil
+
+		case VerdictReorient:
+			if attempt >= max {
+				if rt.HumanCh != nil {
+					return askHuman(ctx, rt, stepID, stepKind, instruction, result, execute)
+				}
+				return "", fmt.Errorf("%s %s: reorient budget exhausted (%d); halted: %s", stepKind, stepID, max, result.Reason)
+			}
+			corrected := instruction + "\n\n" + result.Correction
+			output, _, err = execute(ctx, corrected)
+			if err != nil {
+				return "", err
+			}
+			post = runPostPhase(ctx, rt, pre, output)
+			reconcile = rt.Supervisor.Reconcile(pre, post)
+			req.Post = post
+			req.Triggers = reconcile.Triggers
+
+		case VerdictAskHuman:
+			return askHuman(ctx, rt, stepID, stepKind, instruction, result, execute)
+
+		case VerdictHalt:
+			return "", fmt.Errorf("%s %s: halted by supervision: %s", stepKind, stepID, result.Reason)
+
+		default:
+			return "", fmt.Errorf("%s %s: unknown supervision verdict %q", stepKind, stepID, result.Verdict)
+		}
+	}
+}
+
+// askHuman sends the supervisor's Question on rt.HumanCh and waits for a
+// response. A non-empty response is treated as approval — the response is used
+// as a correction and execute re-runs. Empty, closed, or cancelled returns an
+// error.
+func askHuman(
+	ctx context.Context,
+	rt *Runtime,
+	stepID, stepKind, instruction string,
+	result *SuperviseResult,
+	execute func(ctx context.Context, instruction string) (string, []string, error),
+) (string, error) {
+	if rt.HumanCh == nil {
+		return "", fmt.Errorf("%s %s: AskHuman verdict but no HumanCh wired: %s", stepKind, stepID, result.Question)
+	}
+	rt.HumanCh <- result.Question
+	select {
+	case approval, ok := <-rt.HumanCh:
+		if !ok || strings.TrimSpace(approval) == "" {
+			return "", fmt.Errorf("%s %s: denied by human", stepKind, stepID)
+		}
+		corrected := instruction + "\n\n" + approval
 		out, _, err := execute(ctx, corrected)
 		return out, err
-
-	case VerdictPause:
-		if humanRequired && rt.HumanCh != nil {
-			rt.HumanCh <- result.Question
-			select {
-			case approval, ok := <-rt.HumanCh:
-				if !ok || strings.TrimSpace(approval) == "" {
-					return "", fmt.Errorf("%s %s: paused by supervision, denied by human", stepKind, stepID)
-				}
-				corrected := instruction + "\n\nHuman correction: " + approval
-				out, _, err := execute(ctx, corrected)
-				return out, err
-			case <-ctx.Done():
-				return "", ctx.Err()
-			}
-		}
-		return "", fmt.Errorf("%s %s: paused by supervision: %s", stepKind, stepID, result.Question)
-
-	default:
-		return "", fmt.Errorf("%s %s: unknown supervision verdict %q", stepKind, stepID, result.Verdict)
+	case <-ctx.Done():
+		return "", ctx.Err()
 	}
 }
 
@@ -229,7 +261,6 @@ Respond with a JSON object:
   "scope_in":         ["What you will do"],
   "scope_out":        ["What you will NOT do"],
   "approach":         "Your planned approach",
-  "tools_planned":    ["tools you expect to use"],
   "predicted_output": "What you expect to produce",
   "confidence":       "high|medium|low",
   "assumptions":      ["Assumptions you are making"]
@@ -258,7 +289,6 @@ Respond with a JSON object:
 			ScopeIn         []string `json:"scope_in"`
 			ScopeOut        []string `json:"scope_out"`
 			Approach        string   `json:"approach"`
-			ToolsPlanned    []string `json:"tools_planned"`
 			PredictedOutput string   `json:"predicted_output"`
 			Confidence      string   `json:"confidence"`
 			Assumptions     []string `json:"assumptions"`
@@ -268,7 +298,6 @@ Respond with a JSON object:
 			pre.ScopeIn = data.ScopeIn
 			pre.ScopeOut = data.ScopeOut
 			pre.Approach = data.Approach
-			pre.ToolsPlanned = data.ToolsPlanned
 			pre.PredictedOutput = data.PredictedOutput
 			if data.Confidence != "" {
 				pre.Confidence = data.Confidence
@@ -284,41 +313,49 @@ Respond with a JSON object:
 // runPostPhase asks the LLM to self-assess the work it just did. As with
 // runCommitPhase, a model error or malformed response degrades gracefully
 // rather than aborting the pipeline.
-func runPostPhase(ctx context.Context, rt *Runtime, pre *PreCheckpoint, output string, toolsUsed []string) *PostCheckpoint {
-	prompt := fmt.Sprintf(`You just completed a step. Assess your work:
+func runPostPhase(ctx context.Context, rt *Runtime, pre *PreCheckpoint, output string) *PostCheckpoint {
+	prompt := fmt.Sprintf(`An execution completed. Assess it against the commitment that was declared beforehand:
 
 ORIGINAL INSTRUCTION: %s
 
-YOUR COMMITMENT:
+DECLARED COMMITMENT:
 - Interpretation: %s
+- In bounds:  %s
+- Out of bounds: %s
 - Approach: %s
 - Predicted output: %s
+- Confidence: %s
+- Assumptions: %s
 
 ACTUAL OUTPUT:
 %s
 
-TOOLS USED: %s
-
 Respond with a JSON object:
 {
   "met_commitment": true/false,
-  "deviations":     ["Any deviations from your plan"],
-  "concerns":       ["Any concerns about your output"],
+  "deviations":     ["Any deviations from the plan"],
+  "concerns":       ["Any concerns about the output"],
   "unexpected":     ["Anything unexpected that happened"]
 }`,
-		pre.Instruction, pre.Interpretation, pre.Approach, pre.PredictedOutput,
-		output, strings.Join(toolsUsed, ", "))
+		pre.Instruction,
+		pre.Interpretation,
+		strings.Join(pre.ScopeIn, ", "),
+		strings.Join(pre.ScopeOut, ", "),
+		pre.Approach,
+		pre.PredictedOutput,
+		pre.Confidence,
+		strings.Join(pre.Assumptions, "; "),
+		output)
 
 	resp, err := rt.Model.Chat(ctx, llm.ChatRequest{
 		Messages: []llm.Message{
-			{Role: "system", Content: "You are honestly assessing whether your work met your commitment."},
+			{Role: "system", Content: "Assess the execution below against the commitment that was declared beforehand. Be honest about whether the work stayed on track."},
 			{Role: "user", Content: prompt},
 		},
 	})
 	post := &PostCheckpoint{
 		StepID:        pre.StepID,
 		ActualOutput:  output,
-		ToolsUsed:     toolsUsed,
 		MetCommitment: true, // optimistic default if assessment fails
 		Timestamp:     time.Now(),
 	}

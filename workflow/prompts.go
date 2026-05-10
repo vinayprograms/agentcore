@@ -3,6 +3,7 @@ package workflow
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"strings"
 )
 
@@ -30,12 +31,12 @@ func buildPrompt(name, description string, state *State, outputs []string) strin
 	if len(state.Outputs) > 0 {
 		b.WriteString("<prior-goals>\n")
 		for gname, out := range state.Outputs {
-			fmt.Fprintf(&b, "<goal name=%q>\n%s\n</goal>\n", gname, out)
+			fmt.Fprintf(&b, "<goal name=%q>\n%s\n</goal>\n", gname, html.EscapeString(out))
 		}
 		b.WriteString("</prior-goals>\n\n")
 	}
 
-	fmt.Fprintf(&b, "<goal name=%q>\n%s\n</goal>", name, description)
+	fmt.Fprintf(&b, "<goal name=%q>\n%s\n</goal>", name, html.EscapeString(description))
 
 	if len(outputs) > 0 {
 		b.WriteString("\n\nReturn a JSON object with exactly these fields: ")
@@ -57,17 +58,17 @@ func buildConvergePrompt(name, description string, state *State, history []strin
 			if gname == name {
 				continue
 			}
-			fmt.Fprintf(&b, "<goal name=%q>\n%s\n</goal>\n", gname, out)
+			fmt.Fprintf(&b, "<goal name=%q>\n%s\n</goal>\n", gname, html.EscapeString(out))
 		}
 		b.WriteString("</prior-goals>\n\n")
 	}
 
-	fmt.Fprintf(&b, "<goal name=%q>\n%s\n</goal>", name, description)
+	fmt.Fprintf(&b, "<goal name=%q>\n%s\n</goal>", name, html.EscapeString(description))
 
 	if len(history) > 0 {
 		b.WriteString("\n\n<convergence-history>\n")
 		for i, h := range history {
-			fmt.Fprintf(&b, "<iteration n=%d>\n%s\n</iteration>\n", i+1, h)
+			fmt.Fprintf(&b, "<iteration n=%d>\n%s\n</iteration>\n", i+1, html.EscapeString(h))
 		}
 		b.WriteString("</convergence-history>")
 		b.WriteString("\n\nRefine the previous iteration. When satisfied, include the word CONVERGED in your response.")

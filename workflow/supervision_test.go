@@ -9,9 +9,10 @@ import (
 
 // supervision_test.go covers supervision.go: the runWithSupervision pipeline
 // (pass-through, COMMIT → EXECUTE → POST → RECONCILE → SUPERVISE), the four
-// verdict paths (Continue / Reorient / Pause / unknown), graceful degradation
-// in COMMIT and POST phases, extractJSONObject, the Validate rules around
-// Supervisor / HumanCh wiring, and effectiveSupervision context inheritance.
+// verdict paths (Continue / Reorient / AskHuman / Halt), the byHuman
+// short-circuit, max-reorient budget exhaustion, graceful degradation
+// in COMMIT and POST phases, extractJSONObject, askHuman handshake,
+// and effectiveSupervision context inheritance.
 //
 // jsonModel and the contains() helper live in helpers_test.go (shared).
 
@@ -21,9 +22,10 @@ type fakeSupervisor struct {
 	result    *SuperviseResult
 	supErr    error
 
-	preSeen  *PreCheckpoint
-	postSeen *PostCheckpoint
-	reqSeen  *SuperviseRequest
+	preSeen    *PreCheckpoint
+	postSeen   *PostCheckpoint
+	reqSeen    *SuperviseRequest
+	superviseN int // incremented per Supervise call
 }
 
 func (f *fakeSupervisor) Reconcile(pre *PreCheckpoint, post *PostCheckpoint) *ReconcileResult {
@@ -37,6 +39,7 @@ func (f *fakeSupervisor) Reconcile(pre *PreCheckpoint, post *PostCheckpoint) *Re
 
 func (f *fakeSupervisor) Supervise(ctx context.Context, req SuperviseRequest) (*SuperviseResult, error) {
 	f.reqSeen = &req
+	f.superviseN++
 	if f.supErr != nil {
 		return nil, f.supErr
 	}
@@ -46,18 +49,27 @@ func (f *fakeSupervisor) Supervise(ctx context.Context, req SuperviseRequest) (*
 	return &SuperviseResult{Verdict: VerdictContinue}, nil
 }
 
-// recordingStore captures every persisted checkpoint.
-type recordingStore struct {
-	pres        []*PreCheckpoint
-	posts       []*PostCheckpoint
-	reconciles  []*ReconcileResult
-	supervises  []*SuperviseResult
+// stagedSupervisor returns scripted Supervise results by call number.
+type stagedSupervisor struct {
+	results []*SuperviseResult
+	calls   int
 }
 
-func (s *recordingStore) SavePre(p *PreCheckpoint) error              { s.pres = append(s.pres, p); return nil }
-func (s *recordingStore) SavePost(p *PostCheckpoint) error            { s.posts = append(s.posts, p); return nil }
-func (s *recordingStore) SaveReconcile(r *ReconcileResult) error      { s.reconciles = append(s.reconciles, r); return nil }
-func (s *recordingStore) SaveSupervise(r *SuperviseResult) error      { s.supervises = append(s.supervises, r); return nil }
+func (s *stagedSupervisor) Reconcile(pre *PreCheckpoint, post *PostCheckpoint) *ReconcileResult {
+	return &ReconcileResult{StepID: pre.StepID, Escalate: true, Triggers: []string{"x"}}
+}
+
+func (s *stagedSupervisor) Supervise(ctx context.Context, req SuperviseRequest) (*SuperviseResult, error) {
+	idx := s.calls
+	s.calls++
+	if idx < len(s.results) {
+		return s.results[idx], nil
+	}
+	if len(s.results) > 0 {
+		return s.results[len(s.results)-1], nil
+	}
+	return &SuperviseResult{Verdict: VerdictContinue}, nil
+}
 
 // validJSONPre is a well-formed COMMIT response.
 const validJSONPre = `{
@@ -65,7 +77,6 @@ const validJSONPre = `{
   "scope_in":["a"],
   "scope_out":["b"],
   "approach":"plan",
-  "tools_planned":["t"],
   "predicted_output":"out",
   "confidence":"high",
   "assumptions":["q"]
@@ -103,8 +114,7 @@ func TestRunWithSupervision_LLMContinueNoTriggers(t *testing.T) {
 	sup := &fakeSupervisor{
 		reconcile: &ReconcileResult{Escalate: false},
 	}
-	store := &recordingStore{}
-	rt := &Runtime{Model: model, Supervisor: sup, CheckpointStore: store}
+	rt := &Runtime{Model: model, Supervisor: sup}
 
 	out, err := runWithSupervision(context.Background(), rt, "s1", "goal", "do it", byLLM,
 		func(ctx context.Context, instruction string) (string, []string, error) {
@@ -116,22 +126,15 @@ func TestRunWithSupervision_LLMContinueNoTriggers(t *testing.T) {
 	if out != "answer" {
 		t.Errorf("got %q", out)
 	}
-	if len(store.pres) != 1 || len(store.posts) != 1 || len(store.reconciles) != 1 {
-		t.Errorf("checkpoints: pre=%d post=%d rec=%d", len(store.pres), len(store.posts), len(store.reconciles))
-	}
-	if len(store.supervises) != 0 {
-		t.Errorf("supervise should be skipped when no triggers + not human; got %d", len(store.supervises))
-	}
 }
 
-func TestRunWithSupervision_SuperviseContinuePersistsResult(t *testing.T) {
+func TestRunWithSupervision_SuperviseContinue(t *testing.T) {
 	model := &jsonModel{replies: []string{validJSONPre, validJSONPost}}
 	sup := &fakeSupervisor{
 		reconcile: &ReconcileResult{Escalate: true, Triggers: []string{"x"}},
 		result:    &SuperviseResult{Verdict: VerdictContinue},
 	}
-	store := &recordingStore{}
-	rt := &Runtime{Model: model, Supervisor: sup, CheckpointStore: store}
+	rt := &Runtime{Model: model, Supervisor: sup}
 
 	out, err := runWithSupervision(context.Background(), rt, "s1", "goal", "do it", byLLM,
 		func(ctx context.Context, _ string) (string, []string, error) { return "answer", nil, nil })
@@ -141,8 +144,23 @@ func TestRunWithSupervision_SuperviseContinuePersistsResult(t *testing.T) {
 	if out != "answer" {
 		t.Errorf("got %q", out)
 	}
-	if len(store.supervises) != 1 {
-		t.Errorf("supervise should be persisted, got %d", len(store.supervises))
+}
+
+func TestRunWithSupervision_SuperviseHalt(t *testing.T) {
+	model := &jsonModel{replies: []string{validJSONPre, validJSONPost}}
+	sup := &fakeSupervisor{
+		reconcile: &ReconcileResult{Escalate: true},
+		result:    &SuperviseResult{Verdict: VerdictHalt, Reason: "unsafe"},
+	}
+	rt := &Runtime{Model: model, Supervisor: sup}
+
+	_, err := runWithSupervision(context.Background(), rt, "s1", "goal", "do it", byLLM,
+		func(ctx context.Context, _ string) (string, []string, error) { return "x", nil, nil })
+	if err == nil || !strings.Contains(err.Error(), "halted by supervision") {
+		t.Errorf("expected halt error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "unsafe") {
+		t.Errorf("reason not in error: %v", err)
 	}
 }
 
@@ -162,12 +180,15 @@ func TestRunWithSupervision_UnknownVerdictErrors(t *testing.T) {
 }
 
 func TestRunWithSupervision_ReorientReExecutesWithCorrection(t *testing.T) {
-	model := &jsonModel{replies: []string{validJSONPre, validJSONPost}}
-	sup := &fakeSupervisor{
-		reconcile: &ReconcileResult{Escalate: true, Triggers: []string{"x"}},
-		result:    &SuperviseResult{Verdict: VerdictReorient, Correction: "be more careful"},
+	model := &jsonModel{replies: []string{validJSONPre, validJSONPost, validJSONPost}}
+	// stagedSupervisor returns Reorient once, then Continue.
+	staged := &stagedSupervisor{
+		results: []*SuperviseResult{
+			{Verdict: VerdictReorient, Correction: "be more careful"},
+			{Verdict: VerdictContinue},
+		},
 	}
-	rt := &Runtime{Model: model, Supervisor: sup}
+	rt := &Runtime{Model: model, Supervisor: staged}
 
 	var seen []string
 	out, err := runWithSupervision(context.Background(), rt, "s1", "goal", "do it", byLLM,
@@ -189,39 +210,115 @@ func TestRunWithSupervision_ReorientReExecutesWithCorrection(t *testing.T) {
 	}
 }
 
-func TestRunWithSupervision_PauseLLMWithoutHumanChIsError(t *testing.T) {
+// ---------------------------------------------------------------------------
+// Reorient budget exhaustion.
+// ---------------------------------------------------------------------------
+
+func TestRunWithSupervision_ReorientExecuteErrorPropagates(t *testing.T) {
+	model := &jsonModel{replies: []string{validJSONPre, validJSONPost}}
+	staged := &stagedSupervisor{
+		results: []*SuperviseResult{
+			{Verdict: VerdictReorient, Correction: "retry"},
+		},
+	}
+	rt := &Runtime{Model: model, Supervisor: staged}
+
+	want := errors.New("retry boom")
+	_, err := runWithSupervision(context.Background(), rt, "s1", "goal", "do it", byLLM,
+		func(ctx context.Context, instruction string) (string, []string, error) {
+			// First call (EXECUTE) succeeds; second (reorient) fails.
+			if len(instruction) > 6 { // "do it" vs "do it\n\nretry"
+				return "", nil, want
+			}
+			return "ok", nil, nil
+		})
+	if !errors.Is(err, want) {
+		t.Errorf("expected reorient execute error to propagate, got: %v", err)
+	}
+}
+
+func TestRunWithSupervision_ReorientBudgetExhaustedHalt(t *testing.T) {
+	model := &jsonModel{replies: []string{validJSONPre, validJSONPost, validJSONPost, validJSONPost}}
+	sup := &fakeSupervisor{
+		reconcile: &ReconcileResult{Escalate: true},
+		result:    &SuperviseResult{Verdict: VerdictReorient, Correction: "fix it", Reason: "still wrong"},
+	}
+	rt := &Runtime{Model: model, Supervisor: sup, MaxReorientAttempts: 1}
+
+	_, err := runWithSupervision(context.Background(), rt, "s1", "goal", "do it", byLLM,
+		func(ctx context.Context, _ string) (string, []string, error) { return "x", nil, nil })
+	if err == nil || !strings.Contains(err.Error(), "reorient budget exhausted") {
+		t.Errorf("expected budget-exhausted error, got: %v", err)
+	}
+}
+
+func TestRunWithSupervision_ReorientBudgetExhaustedAsksHuman(t *testing.T) {
+	model := &jsonModel{replies: []string{validJSONPre, validJSONPost, validJSONPost, validJSONPost}}
+	sup := &fakeSupervisor{
+		reconcile: &ReconcileResult{Escalate: true},
+		result:    &SuperviseResult{Verdict: VerdictReorient, Correction: "fix it"},
+	}
+	humanCh := make(chan string)
+	rt := &Runtime{Model: model, Supervisor: sup, HumanCh: humanCh, MaxReorientAttempts: 1}
+
+	go func() {
+		<-humanCh
+		humanCh <- "approved by human"
+	}()
+
+	calls := 0
+	out, err := runWithSupervision(context.Background(), rt, "s1", "goal", "do it", byLLM,
+		func(ctx context.Context, instruction string) (string, []string, error) {
+			calls++
+			return "out-" + instruction, nil, nil
+		})
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	// Initial execute + 1 reorient + human-approval re-execute = 3
+	if calls != 3 {
+		t.Errorf("expected 3 executes (initial + reorient + human), got %d", calls)
+	}
+	if !strings.Contains(out, "approved by human") {
+		t.Errorf("human correction not in output: %q", out)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// AskHuman verdict (LLM-drift detected, supervisor asks for human input).
+// ---------------------------------------------------------------------------
+
+func TestRunWithSupervision_AskHumanWithoutHumanChIsError(t *testing.T) {
 	model := &jsonModel{replies: []string{validJSONPre, validJSONPost}}
 	sup := &fakeSupervisor{
 		reconcile: &ReconcileResult{Escalate: true},
-		result:    &SuperviseResult{Verdict: VerdictPause, Question: "really?"},
+		result:    &SuperviseResult{Verdict: VerdictAskHuman, Question: "really?"},
 	}
 	rt := &Runtime{Model: model, Supervisor: sup}
 
 	_, err := runWithSupervision(context.Background(), rt, "s1", "goal", "do it", byLLM,
 		func(ctx context.Context, _ string) (string, []string, error) { return "x", nil, nil })
-	if err == nil || !strings.Contains(err.Error(), "paused by supervision") {
-		t.Errorf("expected paused-by-supervision error, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "no HumanCh wired") {
+		t.Errorf("expected no-HumanCh error, got: %v", err)
 	}
 }
 
-func TestRunWithSupervision_PauseHumanApprovalContinues(t *testing.T) {
-	model := &jsonModel{replies: []string{validJSONPre, validJSONPost}}
+func TestRunWithSupervision_AskHumanApprovalContinues(t *testing.T) {
+	model := &jsonModel{replies: []string{validJSONPre, validJSONPost, validJSONPost}}
 	sup := &fakeSupervisor{
-		// human-required mode forces SUPERVISE even with no triggers
-		reconcile: &ReconcileResult{Escalate: false},
-		result:    &SuperviseResult{Verdict: VerdictPause, Question: "ok?"},
+		reconcile: &ReconcileResult{Escalate: true},
+		result:    &SuperviseResult{Verdict: VerdictAskHuman, Question: "ok?"},
 	}
-	humanCh := make(chan string) // unbuffered: deterministic handshake
+	humanCh := make(chan string)
 	rt := &Runtime{Model: model, Supervisor: sup, HumanCh: humanCh}
 
-	// The pipeline first sends Question, then reads the next message as approval.
 	go func() {
-		<-humanCh               // receive the question
-		humanCh <- "looks good" // approve
+		<-humanCh
+		humanCh <- "looks good"
 	}()
 
 	calls := 0
-	out, err := runWithSupervision(context.Background(), rt, "s1", "goal", "do it", byHuman,
+	out, err := runWithSupervision(context.Background(), rt, "s1", "goal", "do it", byLLM,
 		func(ctx context.Context, instruction string) (string, []string, error) {
 			calls++
 			return "out-" + instruction, nil, nil
@@ -232,18 +329,55 @@ func TestRunWithSupervision_PauseHumanApprovalContinues(t *testing.T) {
 	if calls != 2 {
 		t.Errorf("expected 2 executes after human approval, got %d", calls)
 	}
-	if !strings.Contains(out, "Human correction") {
+	if !strings.Contains(out, "looks good") {
 		t.Errorf("expected re-execute output to include human correction; got %q", out)
 	}
 }
 
-func TestRunWithSupervision_PauseHumanDenialFails(t *testing.T) {
+// ---------------------------------------------------------------------------
+// byHuman path: skips LLM-SUPERVISE, routes through RECONCILE to askHuman.
+// ---------------------------------------------------------------------------
+
+func TestRunWithSupervision_ByHumanAsksDirectly(t *testing.T) {
+	model := &jsonModel{replies: []string{validJSONPre, validJSONPost}}
+	sup := &fakeSupervisor{
+		reconcile: &ReconcileResult{Escalate: true, Triggers: []string{"x"}},
+		// result is NOT set — byHuman never calls Supervise
+	}
+	humanCh := make(chan string)
+	rt := &Runtime{Model: model, Supervisor: sup, HumanCh: humanCh}
+
+	go func() {
+		<-humanCh
+		humanCh <- "approved"
+	}()
+
+	calls := 0
+	out, err := runWithSupervision(context.Background(), rt, "s1", "goal", "do it", byHuman,
+		func(ctx context.Context, instruction string) (string, []string, error) {
+			calls++
+			return "done-" + instruction, nil, nil
+		})
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("expected 2 executes for byHuman approval, got %d", calls)
+	}
+	if !strings.Contains(out, "approved") {
+		t.Errorf("human approval not in output: %q", out)
+	}
+	if sup.reqSeen != nil {
+		t.Error("byHuman should NOT call Supervise()")
+	}
+}
+
+func TestRunWithSupervision_ByHumanDenialFails(t *testing.T) {
 	model := &jsonModel{replies: []string{validJSONPre, validJSONPost}}
 	sup := &fakeSupervisor{
 		reconcile: &ReconcileResult{Escalate: false},
-		result:    &SuperviseResult{Verdict: VerdictPause, Question: "ok?"},
 	}
-	humanCh := make(chan string) // unbuffered
+	humanCh := make(chan string)
 	rt := &Runtime{Model: model, Supervisor: sup, HumanCh: humanCh}
 
 	go func() {
@@ -258,18 +392,17 @@ func TestRunWithSupervision_PauseHumanDenialFails(t *testing.T) {
 	}
 }
 
-func TestRunWithSupervision_PauseHumanCancelledContext(t *testing.T) {
+func TestRunWithSupervision_ByHumanCancelledContext(t *testing.T) {
 	model := &jsonModel{replies: []string{validJSONPre, validJSONPost}}
 	sup := &fakeSupervisor{
 		reconcile: &ReconcileResult{Escalate: false},
-		result:    &SuperviseResult{Verdict: VerdictPause, Question: "ok?"},
 	}
-	humanCh := make(chan string) // unbuffered: question send blocks until drained
+	humanCh := make(chan string)
 	ctx, cancel := context.WithCancel(context.Background())
 	rt := &Runtime{Model: model, Supervisor: sup, HumanCh: humanCh}
 
 	go func() {
-		<-humanCh // drain question, then cancel without responding
+		<-humanCh
 		cancel()
 	}()
 
@@ -280,13 +413,12 @@ func TestRunWithSupervision_PauseHumanCancelledContext(t *testing.T) {
 	}
 }
 
-func TestRunWithSupervision_PauseHumanChClosedFails(t *testing.T) {
+func TestRunWithSupervision_ByHumanChClosedFails(t *testing.T) {
 	model := &jsonModel{replies: []string{validJSONPre, validJSONPost}}
 	sup := &fakeSupervisor{
 		reconcile: &ReconcileResult{Escalate: false},
-		result:    &SuperviseResult{Verdict: VerdictPause, Question: "ok?"},
 	}
-	humanCh := make(chan string) // unbuffered
+	humanCh := make(chan string)
 	rt := &Runtime{Model: model, Supervisor: sup, HumanCh: humanCh}
 
 	go func() {
@@ -329,6 +461,23 @@ func TestRunWithSupervision_SupervisorErrorPropagates(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// SuperviseRequest carries Model for fallback.
+// ---------------------------------------------------------------------------
+
+func TestSuperviseRequest_CarriesModel(t *testing.T) {
+	model := &jsonModel{replies: []string{validJSONPre, validJSONPost}}
+	rt := &Runtime{Model: model, Supervisor: &fakeSupervisor{
+		reconcile: &ReconcileResult{Escalate: true},
+	}}
+
+	_, err := runWithSupervision(context.Background(), rt, "s1", "goal", "do it", byLLM,
+		func(ctx context.Context, _ string) (string, []string, error) { return "x", nil, nil })
+	if err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // runCommitPhase / runPostPhase: graceful degradation paths.
 // ---------------------------------------------------------------------------
 
@@ -344,7 +493,6 @@ func TestCommitPhase_ModelErrorDegradesToLowConfidence(t *testing.T) {
 }
 
 func TestCommitPhase_MalformedJSONLeavesDefaults(t *testing.T) {
-	// No braces in the response.
 	model := &jsonModel{replies: []string{"sorry I cannot comply"}}
 	pre := runCommitPhase(context.Background(), &Runtime{Model: model}, "s1", "goal", "do it")
 	if pre.Confidence != "low" {
@@ -374,7 +522,7 @@ func TestCommitPhase_BadJSONInsideBracesIgnored(t *testing.T) {
 func TestPostPhase_ModelErrorDegrades(t *testing.T) {
 	model := &jsonModel{err: errors.New("offline")}
 	pre := &PreCheckpoint{StepID: "s1"}
-	post := runPostPhase(context.Background(), &Runtime{Model: model}, pre, "out", []string{"t"})
+	post := runPostPhase(context.Background(), &Runtime{Model: model}, pre, "out")
 	if post.MetCommitment {
 		t.Errorf("MetCommitment should be false when model errs")
 	}
@@ -386,7 +534,7 @@ func TestPostPhase_ModelErrorDegrades(t *testing.T) {
 func TestPostPhase_MalformedJSONLeavesDefaults(t *testing.T) {
 	model := &jsonModel{replies: []string{"no braces here"}}
 	pre := &PreCheckpoint{StepID: "s1"}
-	post := runPostPhase(context.Background(), &Runtime{Model: model}, pre, "out", nil)
+	post := runPostPhase(context.Background(), &Runtime{Model: model}, pre, "out")
 	if !post.MetCommitment {
 		t.Errorf("optimistic default should be MetCommitment=true when no JSON")
 	}
@@ -413,9 +561,6 @@ func TestExtractJSONObject(t *testing.T) {
 	}
 }
 
-// (The Validate-time supervision-wiring rules live in workflow_test.go,
-// since they are checks composed by the package-level Validate.)
-
 // ---------------------------------------------------------------------------
 // effectiveSupervision: inheritance from context.
 // ---------------------------------------------------------------------------
@@ -440,6 +585,3 @@ func TestEffectiveSupervision_NoCtxNoOwn(t *testing.T) {
 		t.Errorf("expected notSupervised, got %v", got)
 	}
 }
-
-// (Workflow.Supervise / Sequence.SuperviseByHuman setter checks live in
-// workflow_test.go and sequence_test.go respectively.)
