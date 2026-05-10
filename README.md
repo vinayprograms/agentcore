@@ -34,8 +34,6 @@ and `swarmkit` directly; `agentcore` never forces indirection.
 | [`supervise`](supervise/README.md) | landed |
 | `packaging`, `identity`, `config` | planned |
 
-The full package roster (purpose, origin, what was explicitly rejected) lives in [`docs/decisions.md`](docs/decisions.md) — that document is the durable source of truth.
-
 ## Quickstart
 
 The `workflow` package is the entry point today. A minimal workflow:
