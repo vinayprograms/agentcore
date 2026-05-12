@@ -32,7 +32,8 @@ and `swarmkit` directly; `agentcore` never forces indirection.
 | [`workflow/security`](workflow/security) | landed |
 | [`observe`](observe/README.md) | landed |
 | [`supervise`](supervise/README.md) | landed |
-| `packaging`, `identity`, `config` | planned |
+| [`packaging`](packaging/README.md) | landed |
+| `identity`, `config` | planned |
 
 ## Quickstart
 

@@ -34,3 +34,4 @@ go.work.sum
 
 # Temporary design artifacts — local only by convention
 docs/
+notes/
