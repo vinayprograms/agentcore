@@ -20,9 +20,6 @@ import (
 func Merge(base, override Config) Config {
 	result := base
 
-	if override.Name != "" {
-		result.Name = override.Name
-	}
 	if override.Security.Level != "" {
 		result.Security = override.Security
 	}

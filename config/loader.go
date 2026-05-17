@@ -15,7 +15,6 @@ import (
 // ---------------------------------------------------------------------------
 
 type rawConfig struct {
-	Name       string                 `toml:"name"`
 	Security   rawSecurity            `toml:"security"`
 	Model      rawModel               `toml:"model"`
 	Supervisor rawModel               `toml:"supervisor"`
@@ -65,15 +64,12 @@ func loadRaw(path string) (rawConfig, error) {
 	return raw, nil
 }
 
-// mergeRaw applies override on top of base. Scalar fields (Name, Security,
-// Model, Supervisor) take the override value when non-zero. Profiles, MCP,
-// and Skills are unioned; override wins on collision.
+// mergeRaw applies override on top of base. Scalar fields (Security, Model,
+// Supervisor) take the override value when non-zero. Profiles, MCP, and
+// Skills are unioned; override wins on collision.
 func mergeRaw(base, override rawConfig) rawConfig {
 	result := base
 
-	if override.Name != "" {
-		result.Name = override.Name
-	}
 	if override.Security.Level != "" {
 		result.Security = override.Security
 	}
@@ -137,7 +133,6 @@ func (r rawConfig) toConfig() (Config, error) {
 	}
 
 	return Config{
-		Name: r.Name,
 		Models: Models{
 			Default:    defaultModel,
 			Supervisor: supervisorModel,

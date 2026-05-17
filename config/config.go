@@ -29,10 +29,10 @@ import (
 
 // Config holds the parsed contents of agent.toml as ready-to-wire agentkit
 // types. Fields with empty/zero values were absent from the source file(s).
+//
+// agent.toml is runtime configuration (models, MCP, security, skills).
+// Workflow identity — name, inputs, goals — belongs in the Agentfile.
 type Config struct {
-	// Name is the workflow identifier, matching the NAME directive.
-	Name string
-
 	// Models holds all LLM configurations: the default, supervisor, and
 	// named profiles. Inject APIKey from credentials before calling llm.New.
 	Models Models

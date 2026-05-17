@@ -77,9 +77,6 @@ func TestFromFile_Get_FullConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if cfg.Name != "test-agent" {
-		t.Errorf("Name=%q", cfg.Name)
-	}
 	if cfg.Security.Level != "paranoid" {
 		t.Errorf("Security.Level=%q", cfg.Security.Level)
 	}
@@ -316,9 +313,6 @@ func TestNewUnion_LayersMerge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if cfg.Name != "project-agent" {
-		t.Errorf("Name=%q want project-agent", cfg.Name)
-	}
 	if cfg.Models.Default.Model != "claude-opus-4-7" {
 		t.Errorf("Default.Model=%q want claude-opus-4-7", cfg.Models.Default.Model)
 	}
@@ -344,12 +338,9 @@ func TestNewUnion_SkipsNotFound(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "absent.toml")
 	present := writeFile(t, dir, "agent.toml", fullTOML)
-	cfg, err := NewUnion(FromFile(missing), FromFile(present)).Get()
+	_, err := NewUnion(FromFile(missing), FromFile(present)).Get()
 	if err != nil {
 		t.Fatalf("Get: %v", err)
-	}
-	if cfg.Name != "test-agent" {
-		t.Errorf("Name=%q", cfg.Name)
 	}
 }
 
@@ -404,14 +395,11 @@ bad toml
 // ---------------------------------------------------------------------------
 
 func TestMerge_ScalarOverride(t *testing.T) {
-	base := Config{Name: "base", Security: Security{Level: "default"}}
-	override := Config{Name: "override"}
+	base := Config{Security: Security{Level: "default"}}
+	override := Config{Security: Security{Level: "paranoid"}}
 	result := Merge(base, override)
-	if result.Name != "override" {
-		t.Errorf("Name=%q", result.Name)
-	}
-	if result.Security.Level != "default" {
-		t.Errorf("Security.Level=%q (should be preserved from base)", result.Security.Level)
+	if result.Security.Level != "paranoid" {
+		t.Errorf("Security.Level=%q (override should win)", result.Security.Level)
 	}
 }
 
@@ -632,9 +620,6 @@ model = "claude-opus-4-7"
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if cfg.Name != "from-file" {
-		t.Errorf("Name=%q", cfg.Name)
-	}
 	if cfg.Security.Level != "paranoid" {
 		t.Errorf("Security.Level=%q want paranoid", cfg.Security.Level)
 	}
@@ -652,12 +637,9 @@ name = "x"
 service = "anthropic"
 model = "claude-opus-4-7"
 `))
-	cfg, err := NewUnion(&notFoundSource{}, file).Get()
+	_, err := NewUnion(&notFoundSource{}, file).Get()
 	if err != nil {
 		t.Fatalf("Get: %v", err)
-	}
-	if cfg.Name != "x" {
-		t.Errorf("Name=%q", cfg.Name)
 	}
 }
 

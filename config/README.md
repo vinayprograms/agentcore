@@ -175,7 +175,6 @@ cfg, err := config.NewUnion(
 ## agent.toml reference
 
 ```toml
-name = "threat-model"
 
 # skills must appear before any [section] headers (TOML table scope rule)
 skills = ["./skills", "~/.agent/skills"]
