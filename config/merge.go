@@ -10,61 +10,61 @@ import (
 // Merge returns base with override applied. Fields in override take
 // precedence when non-zero; zero values leave the base field unchanged.
 //
-// Map fields (Profiles, MCPServers) are unioned: override entries win on
-// name collision. SkillPaths are concatenated with override paths first so
+// Models.Profiles and MCP maps are unioned: override entries win on name
+// collision. Skills are concatenated with override paths first so
 // higher-priority skills shadow lower-priority ones on bare-name lookup.
 //
-// The supervisor default (SupervisorModel → DefaultModel when unset) is
-// applied after merging so it reflects the merged DefaultModel, not either
-// layer's individual DefaultModel.
+// The supervisor default (Models.Supervisor → Models.Default when unset)
+// is applied after merging so it reflects the merged Default, not either
+// layer's individual Default.
 func Merge(base, override Config) Config {
 	result := base
 
 	if override.Name != "" {
 		result.Name = override.Name
 	}
-	if override.SecurityMode != "" {
-		result.SecurityMode = override.SecurityMode
+	if override.Security.Level != "" {
+		result.Security = override.Security
 	}
-	if override.DefaultModel.Service != "" {
-		result.DefaultModel = override.DefaultModel
+	if override.Models.Default.Service != "" {
+		result.Models.Default = override.Models.Default
 	}
-	if override.SupervisorModel.Service != "" {
-		result.SupervisorModel = override.SupervisorModel
+	if override.Models.Supervisor.Service != "" {
+		result.Models.Supervisor = override.Models.Supervisor
 	}
 
-	if len(override.Profiles) > 0 {
-		if result.Profiles == nil {
-			result.Profiles = make(map[string]llm.Config, len(override.Profiles))
+	if len(override.Models.Profiles) > 0 {
+		if result.Models.Profiles == nil {
+			result.Models.Profiles = make(map[string]llm.Config, len(override.Models.Profiles))
 		} else {
-			result.Profiles = maps.Clone(result.Profiles)
+			result.Models.Profiles = maps.Clone(result.Models.Profiles)
 		}
-		maps.Copy(result.Profiles, override.Profiles)
+		maps.Copy(result.Models.Profiles, override.Models.Profiles)
 	}
 
-	if len(override.MCPServers.Stdio) > 0 {
-		if result.MCPServers.Stdio == nil {
-			result.MCPServers.Stdio = make(map[string]mcp.ServerConfig, len(override.MCPServers.Stdio))
+	if len(override.MCP.Stdio) > 0 {
+		if result.MCP.Stdio == nil {
+			result.MCP.Stdio = make(map[string]mcp.ServerConfig, len(override.MCP.Stdio))
 		} else {
-			result.MCPServers.Stdio = maps.Clone(result.MCPServers.Stdio)
+			result.MCP.Stdio = maps.Clone(result.MCP.Stdio)
 		}
-		maps.Copy(result.MCPServers.Stdio, override.MCPServers.Stdio)
+		maps.Copy(result.MCP.Stdio, override.MCP.Stdio)
 	}
 
-	if len(override.MCPServers.HTTP) > 0 {
-		if result.MCPServers.HTTP == nil {
-			result.MCPServers.HTTP = make(map[string]mcp.HTTPConfig, len(override.MCPServers.HTTP))
+	if len(override.MCP.HTTP) > 0 {
+		if result.MCP.HTTP == nil {
+			result.MCP.HTTP = make(map[string]mcp.HTTPConfig, len(override.MCP.HTTP))
 		} else {
-			result.MCPServers.HTTP = maps.Clone(result.MCPServers.HTTP)
+			result.MCP.HTTP = maps.Clone(result.MCP.HTTP)
 		}
-		maps.Copy(result.MCPServers.HTTP, override.MCPServers.HTTP)
+		maps.Copy(result.MCP.HTTP, override.MCP.HTTP)
 	}
 
-	result.SkillPaths = dedupPaths(override.SkillPaths, result.SkillPaths)
+	result.Skills = dedupPaths(override.Skills, result.Skills)
 
-	// Apply supervisor default after merge so it uses the merged DefaultModel.
-	if result.SupervisorModel.Service == "" {
-		result.SupervisorModel = result.DefaultModel
+	// Apply supervisor default after merge so it uses the merged Default.
+	if result.Models.Supervisor.Service == "" {
+		result.Models.Supervisor = result.Models.Default
 	}
 
 	return result

@@ -18,7 +18,10 @@ import (
 
 const fullTOML = `
 name = "test-agent"
-security_mode = "paranoid"
+skills = ["./skills", "~/.agent/skills"]
+
+[security]
+level = "paranoid"
 
 [model]
 service = "anthropic"
@@ -53,9 +56,6 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
 
 [mcp.remote-tools]
 endpoint = "https://tools.example.internal/mcp"
-
-[skills]
-paths = ["./skills", "~/.agent/skills"]
 `
 
 func writeFile(t *testing.T, dir, name, content string) string {
@@ -73,16 +73,15 @@ func writeFile(t *testing.T, dir, name, content string) string {
 
 func TestFromFile_Get_FullConfig(t *testing.T) {
 	dir := t.TempDir()
-	src := FromFile(writeFile(t, dir, "agent.toml", fullTOML))
-	cfg, err := src.Get()
+	cfg, err := FromFile(writeFile(t, dir, "agent.toml", fullTOML)).Get()
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	if cfg.Name != "test-agent" {
 		t.Errorf("Name=%q", cfg.Name)
 	}
-	if cfg.SecurityMode != "paranoid" {
-		t.Errorf("SecurityMode=%q", cfg.SecurityMode)
+	if cfg.Security.Level != "paranoid" {
+		t.Errorf("Security.Level=%q", cfg.Security.Level)
 	}
 }
 
@@ -92,9 +91,9 @@ func TestFromFile_Get_DefaultModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	m := cfg.DefaultModel
+	m := cfg.Models.Default
 	if m.Service != "anthropic" || m.Model != "claude-opus-4-7" {
-		t.Errorf("DefaultModel: %q/%q", m.Service, m.Model)
+		t.Errorf("Models.Default: %q/%q", m.Service, m.Model)
 	}
 	if m.MaxTokens != 8192 {
 		t.Errorf("MaxTokens=%d", m.MaxTokens)
@@ -122,8 +121,8 @@ func TestFromFile_Get_SupervisorExplicit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if cfg.SupervisorModel.Model != "claude-haiku-4-5-20251001" {
-		t.Errorf("SupervisorModel.Model=%q", cfg.SupervisorModel.Model)
+	if cfg.Models.Supervisor.Model != "claude-haiku-4-5-20251001" {
+		t.Errorf("Models.Supervisor.Model=%q", cfg.Models.Supervisor.Model)
 	}
 }
 
@@ -139,9 +138,9 @@ model = "claude-opus-4-7"
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if cfg.SupervisorModel.Model != cfg.DefaultModel.Model {
+	if cfg.Models.Supervisor.Model != cfg.Models.Default.Model {
 		t.Errorf("supervisor should default to model: got %q want %q",
-			cfg.SupervisorModel.Model, cfg.DefaultModel.Model)
+			cfg.Models.Supervisor.Model, cfg.Models.Default.Model)
 	}
 }
 
@@ -151,10 +150,10 @@ func TestFromFile_Get_Profiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if len(cfg.Profiles) != 2 {
-		t.Fatalf("Profiles count=%d", len(cfg.Profiles))
+	if len(cfg.Models.Profiles) != 2 {
+		t.Fatalf("Profiles count=%d", len(cfg.Models.Profiles))
 	}
-	if rh := cfg.Profiles["reasoning-heavy"]; rh.Retry.MaxRetries != 5 {
+	if rh := cfg.Models.Profiles["reasoning-heavy"]; rh.Retry.MaxRetries != 5 {
 		t.Errorf("reasoning-heavy MaxRetries=%d", rh.Retry.MaxRetries)
 	}
 }
@@ -165,19 +164,30 @@ func TestFromFile_Get_MCPServers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	stdio, ok := cfg.MCPServers.Stdio["filesystem"]
+	stdio, ok := cfg.MCP.Stdio["filesystem"]
 	if !ok {
 		t.Fatal("filesystem stdio server missing")
 	}
 	if stdio.Command != "npx" {
 		t.Errorf("command=%q", stdio.Command)
 	}
-	httpSrv, ok := cfg.MCPServers.HTTP["remote-tools"]
+	httpSrv, ok := cfg.MCP.HTTP["remote-tools"]
 	if !ok {
 		t.Fatal("remote-tools http server missing")
 	}
 	if httpSrv.Endpoint != "https://tools.example.internal/mcp" {
 		t.Errorf("endpoint=%q", httpSrv.Endpoint)
+	}
+}
+
+func TestFromFile_Get_Skills(t *testing.T) {
+	dir := t.TempDir()
+	cfg, err := FromFile(writeFile(t, dir, "agent.toml", fullTOML)).Get()
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if len(cfg.Skills) != 2 {
+		t.Errorf("Skills count=%d", len(cfg.Skills))
 	}
 }
 
@@ -247,11 +257,11 @@ model = "claude-opus-4-7"
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if cfg.MCPServers.Stdio == nil {
-		t.Error("MCPServers.Stdio should be non-nil")
+	if cfg.MCP.Stdio == nil {
+		t.Error("MCP.Stdio should be non-nil")
 	}
-	if cfg.MCPServers.HTTP == nil {
-		t.Error("MCPServers.HTTP should be non-nil")
+	if cfg.MCP.HTTP == nil {
+		t.Error("MCP.HTTP should be non-nil")
 	}
 }
 
@@ -261,7 +271,10 @@ model = "claude-opus-4-7"
 
 const globalTOML = `
 name = "global-agent"
-security_mode = "default"
+skills = ["~/.agent/skills"]
+
+[security]
+level = "default"
 
 [model]
 service = "anthropic"
@@ -274,13 +287,11 @@ model = "claude-opus-4-7"
 
 [mcp.shared-tools]
 endpoint = "https://shared.example.internal/mcp"
-
-[skills]
-paths = ["~/.agent/skills"]
 `
 
 const projectTOML = `
 name = "project-agent"
+skills = ["./skills"]
 
 [model]
 service = "anthropic"
@@ -294,47 +305,38 @@ model = "claude-opus-4-7"
 [mcp.project-tools]
 command = "npx"
 args = ["-y", "@example/project-tools"]
-
-[skills]
-paths = ["./skills"]
 `
 
 func TestNewUnion_LayersMerge(t *testing.T) {
 	dir := t.TempDir()
-	globalPath := writeFile(t, dir, "global.toml", globalTOML)
-	projectPath := writeFile(t, dir, "project.toml", projectTOML)
-
-	cfg, err := NewUnion(FromFile(globalPath), FromFile(projectPath)).Get()
+	cfg, err := NewUnion(
+		FromFile(writeFile(t, dir, "global.toml", globalTOML)),
+		FromFile(writeFile(t, dir, "project.toml", projectTOML)),
+	).Get()
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-
-	// project name overrides global
 	if cfg.Name != "project-agent" {
 		t.Errorf("Name=%q want project-agent", cfg.Name)
 	}
-	// project model overrides global
-	if cfg.DefaultModel.Model != "claude-opus-4-7" {
-		t.Errorf("DefaultModel.Model=%q want claude-opus-4-7", cfg.DefaultModel.Model)
+	if cfg.Models.Default.Model != "claude-opus-4-7" {
+		t.Errorf("Default.Model=%q want claude-opus-4-7", cfg.Models.Default.Model)
 	}
-	// global security_mode preserved (project didn't set it)
-	if cfg.SecurityMode != "default" {
-		t.Errorf("SecurityMode=%q want default", cfg.SecurityMode)
+	if cfg.Security.Level != "default" {
+		t.Errorf("Security.Level=%q want default (from global)", cfg.Security.Level)
 	}
-	// global explicitly set supervisor; project didn't — global's should win
-	if cfg.SupervisorModel.Model != "claude-opus-4-7" {
-		t.Errorf("SupervisorModel=%q want claude-opus-4-7 (from global)", cfg.SupervisorModel.Model)
+	// Global explicitly set supervisor; project didn't — global's should win.
+	if cfg.Models.Supervisor.Model != "claude-opus-4-7" {
+		t.Errorf("Supervisor=%q want claude-opus-4-7 (from global)", cfg.Models.Supervisor.Model)
 	}
-	// MCP is union of both
-	if _, ok := cfg.MCPServers.HTTP["shared-tools"]; !ok {
+	if _, ok := cfg.MCP.HTTP["shared-tools"]; !ok {
 		t.Error("shared-tools from global missing")
 	}
-	if _, ok := cfg.MCPServers.Stdio["project-tools"]; !ok {
+	if _, ok := cfg.MCP.Stdio["project-tools"]; !ok {
 		t.Error("project-tools from project missing")
 	}
-	// project skills precede global skills
-	if len(cfg.SkillPaths) != 2 || cfg.SkillPaths[0] != "./skills" {
-		t.Errorf("SkillPaths=%v", cfg.SkillPaths)
+	if len(cfg.Skills) != 2 || cfg.Skills[0] != "./skills" {
+		t.Errorf("Skills=%v", cfg.Skills)
 	}
 }
 
@@ -342,7 +344,6 @@ func TestNewUnion_SkipsNotFound(t *testing.T) {
 	dir := t.TempDir()
 	missing := filepath.Join(dir, "absent.toml")
 	present := writeFile(t, dir, "agent.toml", fullTOML)
-
 	cfg, err := NewUnion(FromFile(missing), FromFile(present)).Get()
 	if err != nil {
 		t.Fatalf("Get: %v", err)
@@ -381,8 +382,7 @@ args = []
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	// project's stdio entry should replace global's HTTP entry for the same name
-	if _, ok := cfg.MCPServers.Stdio["shared-tools"]; !ok {
+	if _, ok := cfg.MCP.Stdio["shared-tools"]; !ok {
 		t.Error("overridden shared-tools should be stdio")
 	}
 }
@@ -393,9 +393,7 @@ func TestNewUnion_PropagatesParseError(t *testing.T) {
 bad toml
 `
 	dir := t.TempDir()
-	_, err := NewUnion(
-		FromFile(writeFile(t, dir, "bad.toml", badTOML)),
-	).Get()
+	_, err := NewUnion(FromFile(writeFile(t, dir, "bad.toml", badTOML))).Get()
 	if err == nil || errors.Is(err, ErrNotFound) {
 		t.Errorf("expected parse error, got: %v", err)
 	}
@@ -406,66 +404,145 @@ bad toml
 // ---------------------------------------------------------------------------
 
 func TestMerge_ScalarOverride(t *testing.T) {
-	base := Config{Name: "base", SecurityMode: "default"}
+	base := Config{Name: "base", Security: Security{Level: "default"}}
 	override := Config{Name: "override"}
 	result := Merge(base, override)
 	if result.Name != "override" {
 		t.Errorf("Name=%q", result.Name)
 	}
-	if result.SecurityMode != "default" {
-		t.Errorf("SecurityMode=%q (should be preserved from base)", result.SecurityMode)
+	if result.Security.Level != "default" {
+		t.Errorf("Security.Level=%q (should be preserved from base)", result.Security.Level)
+	}
+}
+
+func TestMerge_SecurityOverride(t *testing.T) {
+	base := Config{Security: Security{Level: "default"}}
+	override := Config{Security: Security{Level: "paranoid"}}
+	if Merge(base, override).Security.Level != "paranoid" {
+		t.Error("Security.Level override did not apply")
+	}
+}
+
+func TestMerge_SupervisorModelOverride(t *testing.T) {
+	base := Config{
+		Models: Models{
+			Default:    llm.Config{Service: "anthropic", Model: "haiku"},
+			Supervisor: llm.Config{Service: "anthropic", Model: "opus"},
+		},
+	}
+	override := Config{
+		Models: Models{
+			Default:    llm.Config{Service: "anthropic", Model: "sonnet"},
+			Supervisor: llm.Config{Service: "anthropic", Model: "dedicated"},
+		},
+	}
+	result := Merge(base, override)
+	if result.Models.Supervisor.Model != "dedicated" {
+		t.Errorf("Supervisor=%q want dedicated", result.Models.Supervisor.Model)
 	}
 }
 
 func TestMerge_ProfilesUnion(t *testing.T) {
-	base := Config{Profiles: map[string]llm.Config{"fast": {Service: "anthropic"}}}
-	override := Config{Profiles: map[string]llm.Config{"reasoning-heavy": {Service: "anthropic"}}}
+	base := Config{Models: Models{Profiles: map[string]llm.Config{
+		"fast": {Service: "anthropic"},
+	}}}
+	override := Config{Models: Models{Profiles: map[string]llm.Config{
+		"reasoning-heavy": {Service: "anthropic"},
+	}}}
 	result := Merge(base, override)
-	if len(result.Profiles) != 2 {
-		t.Errorf("Profiles count=%d want 2", len(result.Profiles))
+	if len(result.Models.Profiles) != 2 {
+		t.Errorf("Profiles count=%d want 2", len(result.Models.Profiles))
 	}
 }
 
 func TestMerge_ProfileCollisionOverrideWins(t *testing.T) {
-	base := Config{Profiles: map[string]llm.Config{"fast": {Service: "anthropic", Model: "slow"}}}
-	override := Config{Profiles: map[string]llm.Config{"fast": {Service: "anthropic", Model: "faster"}}}
+	base := Config{Models: Models{Profiles: map[string]llm.Config{
+		"fast": {Service: "anthropic", Model: "slow"},
+	}}}
+	override := Config{Models: Models{Profiles: map[string]llm.Config{
+		"fast": {Service: "anthropic", Model: "faster"},
+	}}}
+	if Merge(base, override).Models.Profiles["fast"].Model != "faster" {
+		t.Error("profile collision: override should win")
+	}
+}
+
+func TestMerge_NilBaseProfiles(t *testing.T) {
+	base := Config{}
+	override := Config{Models: Models{Profiles: map[string]llm.Config{
+		"fast": {Service: "anthropic"},
+	}}}
 	result := Merge(base, override)
-	if result.Profiles["fast"].Model != "faster" {
-		t.Errorf("fast profile should use override, got %q", result.Profiles["fast"].Model)
+	if _, ok := result.Models.Profiles["fast"]; !ok {
+		t.Error("fast profile missing after merge into nil-profile base")
 	}
 }
 
 func TestMerge_MCPUnion(t *testing.T) {
-	base := Config{MCPServers: MCPServers{
+	base := Config{MCP: MCPServers{
 		HTTP: map[string]mcp.HTTPConfig{"global": {Endpoint: "https://global"}},
 	}}
-	override := Config{MCPServers: MCPServers{
+	override := Config{MCP: MCPServers{
 		Stdio: map[string]mcp.ServerConfig{"local": {Command: "npx"}},
 	}}
 	result := Merge(base, override)
-	if _, ok := result.MCPServers.HTTP["global"]; !ok {
+	if _, ok := result.MCP.HTTP["global"]; !ok {
 		t.Error("global HTTP server missing after merge")
 	}
-	if _, ok := result.MCPServers.Stdio["local"]; !ok {
+	if _, ok := result.MCP.Stdio["local"]; !ok {
 		t.Error("local stdio server missing after merge")
 	}
 }
 
-func TestMerge_SkillPathsOverrideFirst(t *testing.T) {
-	base := Config{SkillPaths: []string{"~/.agent/skills"}}
-	override := Config{SkillPaths: []string{"./skills"}}
+func TestMerge_NilBaseStdioMCP(t *testing.T) {
+	base := Config{}
+	override := Config{MCP: MCPServers{Stdio: map[string]mcp.ServerConfig{"x": {Command: "cmd"}}}}
 	result := Merge(base, override)
-	if result.SkillPaths[0] != "./skills" {
-		t.Errorf("override skills should be first, got %v", result.SkillPaths)
+	if _, ok := result.MCP.Stdio["x"]; !ok {
+		t.Error("stdio server x missing after merge into nil stdio base")
+	}
+}
+
+func TestMerge_NilBaseHTTPMCP(t *testing.T) {
+	base := Config{}
+	override := Config{MCP: MCPServers{HTTP: map[string]mcp.HTTPConfig{"x": {Endpoint: "https://example.com"}}}}
+	result := Merge(base, override)
+	if _, ok := result.MCP.HTTP["x"]; !ok {
+		t.Error("http server x missing after merge into nil http base")
+	}
+}
+
+func TestMerge_HTTPMapClonedWhenNonNil(t *testing.T) {
+	base := Config{MCP: MCPServers{
+		HTTP: map[string]mcp.HTTPConfig{"existing": {Endpoint: "https://base"}},
+	}}
+	override := Config{MCP: MCPServers{
+		HTTP: map[string]mcp.HTTPConfig{"new": {Endpoint: "https://new"}},
+	}}
+	result := Merge(base, override)
+	if _, ok := result.MCP.HTTP["existing"]; !ok {
+		t.Error("existing http server lost after merge")
+	}
+	if _, ok := result.MCP.HTTP["new"]; !ok {
+		t.Error("new http server missing after merge")
+	}
+}
+
+func TestMerge_SkillPathsOverrideFirst(t *testing.T) {
+	base := Config{Skills: []string{"~/.agent/skills"}}
+	override := Config{Skills: []string{"./skills"}}
+	result := Merge(base, override)
+	if result.Skills[0] != "./skills" {
+		t.Errorf("override skills should be first, got %v", result.Skills)
 	}
 }
 
 func TestMerge_SkillPathsDeduplicated(t *testing.T) {
-	base := Config{SkillPaths: []string{"./shared", "~/.agent/skills"}}
-	override := Config{SkillPaths: []string{"./skills", "./shared"}}
+	base := Config{Skills: []string{"./shared", "~/.agent/skills"}}
+	override := Config{Skills: []string{"./skills", "./shared"}}
 	result := Merge(base, override)
 	count := 0
-	for _, p := range result.SkillPaths {
+	for _, p := range result.Skills {
 		if p == "./shared" {
 			count++
 		}
@@ -475,28 +552,61 @@ func TestMerge_SkillPathsDeduplicated(t *testing.T) {
 	}
 }
 
+func TestMerge_EmptyOverrideSkillPaths(t *testing.T) {
+	base := Config{Skills: []string{"./base"}}
+	result := Merge(base, Config{})
+	if len(result.Skills) != 1 || result.Skills[0] != "./base" {
+		t.Errorf("Skills=%v", result.Skills)
+	}
+}
+
 func TestMerge_SupervisorDefaultAfterMerge(t *testing.T) {
-	// Neither layer sets supervisor. After merge, supervisor = merged DefaultModel.
-	base := Config{DefaultModel: llm.Config{Service: "anthropic", Model: "haiku"}}
-	override := Config{DefaultModel: llm.Config{Service: "anthropic", Model: "opus"}}
+	base := Config{Models: Models{Default: llm.Config{Service: "anthropic", Model: "haiku"}}}
+	override := Config{Models: Models{Default: llm.Config{Service: "anthropic", Model: "opus"}}}
 	result := Merge(base, override)
-	if result.SupervisorModel.Model != "opus" {
-		t.Errorf("supervisor should default to merged model opus, got %q", result.SupervisorModel.Model)
+	if result.Models.Supervisor.Model != "opus" {
+		t.Errorf("supervisor should default to merged model opus, got %q", result.Models.Supervisor.Model)
 	}
 }
 
 func TestMerge_BaseMapsPreservedWithNoOverride(t *testing.T) {
-	// Merge with an empty override should not nil out base maps.
 	base := Config{
-		Profiles:   map[string]llm.Config{"fast": {Service: "anthropic"}},
-		MCPServers: MCPServers{Stdio: map[string]mcp.ServerConfig{"x": {Command: "y"}}},
+		Models: Models{Profiles: map[string]llm.Config{"fast": {Service: "anthropic"}}},
+		MCP:    MCPServers{Stdio: map[string]mcp.ServerConfig{"x": {Command: "y"}}},
 	}
 	result := Merge(base, Config{})
-	if _, ok := result.Profiles["fast"]; !ok {
+	if _, ok := result.Models.Profiles["fast"]; !ok {
 		t.Error("fast profile lost")
 	}
-	if _, ok := result.MCPServers.Stdio["x"]; !ok {
+	if _, ok := result.MCP.Stdio["x"]; !ok {
 		t.Error("stdio server x lost")
+	}
+}
+
+func TestMerge_NonNilBaseProfilesCloned(t *testing.T) {
+	base := Config{Models: Models{Profiles: map[string]llm.Config{"existing": {Service: "anthropic"}}}}
+	override := Config{Models: Models{Profiles: map[string]llm.Config{"new": {Service: "anthropic"}}}}
+	result := Merge(base, override)
+	if _, ok := result.Models.Profiles["existing"]; !ok {
+		t.Error("existing profile lost")
+	}
+	if _, ok := result.Models.Profiles["new"]; !ok {
+		t.Error("new profile missing")
+	}
+	if _, ok := base.Models.Profiles["new"]; ok {
+		t.Error("base was mutated by Merge")
+	}
+}
+
+func TestMerge_NonNilBaseStdioMCPCloned(t *testing.T) {
+	base := Config{MCP: MCPServers{Stdio: map[string]mcp.ServerConfig{"existing": {Command: "npx"}}}}
+	override := Config{MCP: MCPServers{Stdio: map[string]mcp.ServerConfig{"new": {Command: "new"}}}}
+	result := Merge(base, override)
+	if _, ok := result.MCP.Stdio["existing"]; !ok {
+		t.Error("existing stdio server lost")
+	}
+	if _, ok := base.MCP.Stdio["new"]; ok {
+		t.Error("base was mutated by Merge")
 	}
 }
 
@@ -504,8 +614,6 @@ func TestMerge_BaseMapsPreservedWithNoOverride(t *testing.T) {
 // Additional coverage: specific branches
 // ---------------------------------------------------------------------------
 
-// thirdPartySource is a non-rawProvider Source used to exercise the
-// Config-level merge path inside unionSource.
 type thirdPartySource struct{ cfg Config }
 
 func (s thirdPartySource) Get() (Config, error) { return s.cfg, nil }
@@ -518,7 +626,7 @@ name = "from-file"
 service = "anthropic"
 model = "claude-opus-4-7"
 `))
-	custom := thirdPartySource{cfg: Config{SecurityMode: "paranoid"}}
+	custom := thirdPartySource{cfg: Config{Security: Security{Level: "paranoid"}}}
 
 	cfg, err := NewUnion(file, custom).Get()
 	if err != nil {
@@ -527,13 +635,16 @@ model = "claude-opus-4-7"
 	if cfg.Name != "from-file" {
 		t.Errorf("Name=%q", cfg.Name)
 	}
-	if cfg.SecurityMode != "paranoid" {
-		t.Errorf("SecurityMode=%q want paranoid", cfg.SecurityMode)
+	if cfg.Security.Level != "paranoid" {
+		t.Errorf("Security.Level=%q want paranoid", cfg.Security.Level)
 	}
 }
 
+type notFoundSource struct{}
+
+func (s *notFoundSource) Get() (Config, error) { return Config{}, ErrNotFound }
+
 func TestNewUnion_ThirdPartySourceNotFound(t *testing.T) {
-	custom := &notFoundSource{}
 	dir := t.TempDir()
 	file := FromFile(writeFile(t, dir, "agent.toml", `
 name = "x"
@@ -541,7 +652,7 @@ name = "x"
 service = "anthropic"
 model = "claude-opus-4-7"
 `))
-	cfg, err := NewUnion(custom, file).Get()
+	cfg, err := NewUnion(&notFoundSource{}, file).Get()
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -550,111 +661,41 @@ model = "claude-opus-4-7"
 	}
 }
 
-type notFoundSource struct{}
-
-func (s *notFoundSource) Get() (Config, error) { return Config{}, ErrNotFound }
-
-func TestNewUnion_ThirdPartySourceError(t *testing.T) {
-	errSrc := &errorSource{}
-	_, err := NewUnion(errSrc).Get()
-	if err == nil || errors.Is(err, ErrNotFound) {
-		t.Errorf("expected propagated error, got: %v", err)
-	}
-}
-
 type errorSource struct{}
 
-func (s *errorSource) Get() (Config, error) {
-	return Config{}, errors.New("source failed")
-}
+func (s *errorSource) Get() (Config, error) { return Config{}, errors.New("source failed") }
 
-func TestMerge_SecurityModeOverride(t *testing.T) {
-	base := Config{SecurityMode: "default"}
-	override := Config{SecurityMode: "paranoid"}
-	if Merge(base, override).SecurityMode != "paranoid" {
-		t.Error("SecurityMode override did not apply")
+func TestNewUnion_ThirdPartySourceGetError(t *testing.T) {
+	_, err := NewUnion(&errorSource{}).Get()
+	if err == nil || errors.Is(err, ErrNotFound) {
+		t.Errorf("expected error propagation, got: %v", err)
 	}
 }
 
-func TestMerge_SupervisorModelOverride(t *testing.T) {
-	base := Config{
-		DefaultModel:    llm.Config{Service: "anthropic", Model: "haiku"},
-		SupervisorModel: llm.Config{Service: "anthropic", Model: "opus"},
-	}
-	override := Config{
-		DefaultModel:    llm.Config{Service: "anthropic", Model: "sonnet"},
-		SupervisorModel: llm.Config{Service: "anthropic", Model: "dedicated"},
-	}
-	result := Merge(base, override)
-	if result.SupervisorModel.Model != "dedicated" {
-		t.Errorf("SupervisorModel=%q want dedicated", result.SupervisorModel.Model)
-	}
-}
-
-func TestMerge_NilBaseProfiles(t *testing.T) {
-	base := Config{}
-	override := Config{Profiles: map[string]llm.Config{"fast": {Service: "anthropic"}}}
-	result := Merge(base, override)
-	if _, ok := result.Profiles["fast"]; !ok {
-		t.Error("fast profile missing after merge into nil-profile base")
+func TestNewUnion_ToConfigErrorPropagated(t *testing.T) {
+	const badDuration = `
+name = "x"
+[model]
+service = "anthropic"
+model = "claude-opus-4-7"
+max_backoff = "not-a-duration"
+`
+	dir := t.TempDir()
+	_, err := NewUnion(FromFile(writeFile(t, dir, "bad.toml", badDuration))).Get()
+	if err == nil || errors.Is(err, ErrNotFound) {
+		t.Errorf("expected toConfig error, got: %v", err)
 	}
 }
 
-func TestMerge_NilBaseStdioMCP(t *testing.T) {
-	base := Config{}
-	override := Config{MCPServers: MCPServers{
-		Stdio: map[string]mcp.ServerConfig{"x": {Command: "cmd"}},
-	}}
-	result := Merge(base, override)
-	if _, ok := result.MCPServers.Stdio["x"]; !ok {
-		t.Error("stdio server x missing after merge into nil stdio base")
-	}
-}
-
-func TestMerge_NilBaseHTTPMCP(t *testing.T) {
-	base := Config{}
-	override := Config{MCPServers: MCPServers{
-		HTTP: map[string]mcp.HTTPConfig{"x": {Endpoint: "https://example.com"}},
-	}}
-	result := Merge(base, override)
-	if _, ok := result.MCPServers.HTTP["x"]; !ok {
-		t.Error("http server x missing after merge into nil http base")
-	}
-}
-
-func TestMerge_HTTPMapClonedWhenNonNil(t *testing.T) {
-	base := Config{MCPServers: MCPServers{
-		HTTP: map[string]mcp.HTTPConfig{"existing": {Endpoint: "https://base"}},
-	}}
-	override := Config{MCPServers: MCPServers{
-		HTTP: map[string]mcp.HTTPConfig{"new": {Endpoint: "https://new"}},
-	}}
-	result := Merge(base, override)
-	if _, ok := result.MCPServers.HTTP["existing"]; !ok {
-		t.Error("existing http server lost after merge")
-	}
-	if _, ok := result.MCPServers.HTTP["new"]; !ok {
-		t.Error("new http server missing after merge")
-	}
-}
-
-func TestMerge_EmptyOverrideSkillPaths(t *testing.T) {
-	base := Config{SkillPaths: []string{"./base"}}
-	result := Merge(base, Config{})
-	if len(result.SkillPaths) != 1 || result.SkillPaths[0] != "./base" {
-		t.Errorf("SkillPaths=%v", result.SkillPaths)
-	}
-}
-
-func TestMergeRaw_SecurityModeAndSupervisorOverride(t *testing.T) {
-	base := rawConfig{SecurityMode: "default"}
+func TestMergeRaw_SecurityAndSupervisorOverride(t *testing.T) {
+	base := rawConfig{Security: rawSecurity{Level: "default"}}
 	override := rawConfig{
-		SecurityMode: "paranoid",
-		Supervisor:   rawModel{Service: "anthropic", Model: "dedicated"},
+		Security:   rawSecurity{Level: "paranoid"},
+		Supervisor: rawModel{Service: "anthropic", Model: "dedicated"},
 	}
 	merged := mergeRaw(base, override)
-	if merged.SecurityMode != "paranoid" {
-		t.Errorf("SecurityMode=%q", merged.SecurityMode)
+	if merged.Security.Level != "paranoid" {
+		t.Errorf("Security.Level=%q", merged.Security.Level)
 	}
 	if merged.Supervisor.Model != "dedicated" {
 		t.Errorf("Supervisor.Model=%q", merged.Supervisor.Model)
@@ -667,6 +708,21 @@ func TestMergeRaw_NilBaseMCP(t *testing.T) {
 	merged := mergeRaw(base, override)
 	if _, ok := merged.MCP["x"]; !ok {
 		t.Error("x entry missing after merge into nil MCP base")
+	}
+}
+
+func TestMergeRaw_NonNilBaseProfilesCloned(t *testing.T) {
+	base := rawConfig{Profiles: map[string]rawModel{"existing": {Service: "anthropic"}}}
+	override := rawConfig{Profiles: map[string]rawModel{"new": {Service: "anthropic"}}}
+	merged := mergeRaw(base, override)
+	if _, ok := merged.Profiles["existing"]; !ok {
+		t.Error("existing profile lost")
+	}
+	if _, ok := merged.Profiles["new"]; !ok {
+		t.Error("new profile missing")
+	}
+	if _, ok := base.Profiles["new"]; ok {
+		t.Error("base profiles mutated by mergeRaw")
 	}
 }
 
@@ -702,57 +758,6 @@ func TestToLLMConfig_InitBackoffError(t *testing.T) {
 	}
 }
 
-func TestMerge_NonNilBaseProfilesCloned(t *testing.T) {
-	base := Config{Profiles: map[string]llm.Config{"existing": {Service: "anthropic"}}}
-	override := Config{Profiles: map[string]llm.Config{"new": {Service: "anthropic"}}}
-	result := Merge(base, override)
-	// Both should be present; base must not be mutated.
-	if _, ok := result.Profiles["existing"]; !ok {
-		t.Error("existing profile lost")
-	}
-	if _, ok := result.Profiles["new"]; !ok {
-		t.Error("new profile missing")
-	}
-	if _, ok := base.Profiles["new"]; ok {
-		t.Error("base was mutated by Merge")
-	}
-}
-
-func TestMerge_NonNilBaseStdioMCPCloned(t *testing.T) {
-	base := Config{MCPServers: MCPServers{
-		Stdio: map[string]mcp.ServerConfig{"existing": {Command: "npx"}},
-	}}
-	override := Config{MCPServers: MCPServers{
-		Stdio: map[string]mcp.ServerConfig{"new": {Command: "new"}},
-	}}
-	result := Merge(base, override)
-	if _, ok := result.MCPServers.Stdio["existing"]; !ok {
-		t.Error("existing stdio server lost")
-	}
-	if _, ok := base.MCPServers.Stdio["new"]; ok {
-		t.Error("base was mutated by Merge")
-	}
-}
-
-func TestMergeRaw_NonNilBaseProfilesCloned(t *testing.T) {
-	base := rawConfig{
-		Profiles: map[string]rawModel{"existing": {Service: "anthropic"}},
-	}
-	override := rawConfig{
-		Profiles: map[string]rawModel{"new": {Service: "anthropic"}},
-	}
-	merged := mergeRaw(base, override)
-	if _, ok := merged.Profiles["existing"]; !ok {
-		t.Error("existing profile lost")
-	}
-	if _, ok := merged.Profiles["new"]; !ok {
-		t.Error("new profile missing")
-	}
-	if _, ok := base.Profiles["new"]; ok {
-		t.Error("base profiles mutated by mergeRaw")
-	}
-}
-
 func TestDedupPaths_EmptyRest(t *testing.T) {
 	result := dedupPaths([]string{"./a", "./b"}, nil)
 	if len(result) != 2 || result[0] != "./a" {
@@ -764,31 +769,6 @@ func TestDedupPaths_EmptyFirst(t *testing.T) {
 	result := dedupPaths(nil, []string{"./a", "./b"})
 	if len(result) != 2 || result[0] != "./a" {
 		t.Errorf("dedupPaths(nil, rest)=%v", result)
-	}
-}
-
-func TestNewUnion_ToConfigErrorPropagated(t *testing.T) {
-	// Valid TOML but invalid duration — loadRaw succeeds, toConfig fails.
-	const badDuration = `
-name = "x"
-[model]
-service = "anthropic"
-model = "claude-opus-4-7"
-max_backoff = "not-a-duration"
-`
-	dir := t.TempDir()
-	_, err := NewUnion(FromFile(writeFile(t, dir, "bad.toml", badDuration))).Get()
-	if err == nil || errors.Is(err, ErrNotFound) {
-		t.Errorf("expected toConfig error, got: %v", err)
-	}
-}
-
-func TestNewUnion_ThirdPartySourceGetError(t *testing.T) {
-	// A third-party source (non-rawProvider) that returns a non-NotFound error
-	// should abort the union.
-	_, err := NewUnion(&errorSource{}).Get()
-	if err == nil || errors.Is(err, ErrNotFound) {
-		t.Errorf("expected error propagation, got: %v", err)
 	}
 }
 

@@ -48,12 +48,18 @@ API keys live in `credentials.toml` and are managed by `agentkit/credentials`.
 Inject them into each `llm.Config` before calling `llm.New`:
 
 ```go
-cred, _ := credStore.Get(cfg.DefaultModel.Service)
-cfg.DefaultModel.APIKey = cred.APIKey
-model, err := llm.New(cfg.DefaultModel)
+// Typical credential store: credentials.toml merged with env vars.
+credStore := credentials.NewUnionStore(
+    credentials.NewFileStore("credentials.toml"),
+    credentials.NewEnvStore(),
+)
+
+cred, _ := credStore.Get(cfg.Models.Default.Service)
+cfg.Models.Default.APIKey = cred.APIKey
+model, err := llm.New(cfg.Models.Default)
 ```
 
-Apply the same pattern to `cfg.SupervisorModel` and each `cfg.Profiles[name]`.
+Apply the same pattern to `cfg.Models.Supervisor` and each `cfg.Models.Profiles[name]`.
 
 ## Policy is not in agent.toml
 
@@ -77,35 +83,43 @@ cfg, err := config.NewUnion(
     config.FromFile("./agent.toml"),
 ).Get()
 
-// Inject credentials and construct live objects
-cred, _ := credStore.Get(cfg.DefaultModel.Service)
-cfg.DefaultModel.APIKey = cred.APIKey
-defaultModel, _ := llm.New(cfg.DefaultModel)
+// Build a credential store. Typically a union of a file store and env vars
+// so that CI/CD environments can override credentials.toml entries via
+// environment variables (e.g. ANTHROPIC_API_KEY).
+credStore := credentials.NewUnionStore(
+    credentials.NewFileStore("credentials.toml"),
+    credentials.NewEnvStore(),
+)
 
-supervisorCred, _ := credStore.Get(cfg.SupervisorModel.Service)
-cfg.SupervisorModel.APIKey = supervisorCred.APIKey
-supervisorModel, _ := llm.New(cfg.SupervisorModel)
+// Inject credentials and construct live objects
+cred, _ := credStore.Get(cfg.Models.Default.Service)
+cfg.Models.Default.APIKey = cred.APIKey
+defaultModel, _ := llm.New(cfg.Models.Default)
+
+supervisorCred, _ := credStore.Get(cfg.Models.Supervisor.Service)
+cfg.Models.Supervisor.APIKey = supervisorCred.APIKey
+supervisorModel, _ := llm.New(cfg.Models.Supervisor)
 
 profiles := make(map[string]llm.Model, len(spec.Profiles()))
 for _, name := range spec.Profiles() {
-    pcfg := cfg.Profiles[name]
+    pcfg := cfg.Models.Profiles[name]
     pc, _ := credStore.Get(pcfg.Service)
     pcfg.APIKey = pc.APIKey
     profiles[name], _ = llm.New(pcfg)
 }
 
 mgr := mcp.NewManager()
-for name, srv := range cfg.MCPServers.Stdio {
+for name, srv := range cfg.MCP.Stdio {
     client, _ := mcp.Stdio(ctx, srv)
     mgr.Register(name, client)
 }
-for name, srv := range cfg.MCPServers.HTTP {
+for name, srv := range cfg.MCP.HTTP {
     client, _ := mcp.HTTP(ctx, srv)
     mgr.Register(name, client)
 }
 
-skillRoots := make([]*os.Root, len(cfg.SkillPaths))
-for i, p := range cfg.SkillPaths {
+skillRoots := make([]*os.Root, len(cfg.Skills))
+for i, p := range cfg.Skills {
     skillRoots[i], _ = os.OpenRoot(p)
 }
 ```
@@ -162,7 +176,13 @@ cfg, err := config.NewUnion(
 
 ```toml
 name = "threat-model"
-security_mode = "default"   # fallback when Agentfile has no SECURITY directive
+
+# skills must appear before any [section] headers (TOML table scope rule)
+skills = ["./skills", "~/.agent/skills"]
+
+[security]
+level = "default"   # "default" | "paranoid" | "research"; fallback when Agentfile has no SECURITY directive
+# scope = "..."     # required when level = "research"
 
 [model]
 service = "anthropic"       # required
@@ -180,7 +200,7 @@ budget_tokens = 5000
 [supervisor]
 service = "anthropic"
 model = "claude-opus-4-7"
-# Absent → SupervisorModel defaults to DefaultModel after merge.
+# Absent → Models.Supervisor defaults to Models.Default after merge.
 # Retry fields same as [model]; each model tunes independently.
 
 [profiles.reasoning-heavy]
@@ -202,9 +222,6 @@ args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
 
 [mcp.remote-tools]
 endpoint = "https://tools.example.internal/mcp"
-
-[skills]
-paths = ["./skills", "~/.agent/skills"]
 ```
 
 ## Merge semantics
@@ -213,9 +230,9 @@ When using `NewUnion` or `Merge`:
 
 | Field | Rule |
 |---|---|
-| `Name`, `SecurityMode` | Right (higher-priority) source wins when non-empty |
-| `DefaultModel`, `SupervisorModel` | Right source wins when `Service` is non-empty |
-| `Profiles` | Union; right source wins on name collision |
-| `MCPServers.Stdio`, `MCPServers.HTTP` | Union; right source wins on name collision |
-| `SkillPaths` | Union with right source's paths first (shadow precedence) |
-| Supervisor default | Applied after merge: if `SupervisorModel.Service == ""`, uses `DefaultModel` |
+| `Name`, `Security.Level` | Right (higher-priority) source wins when non-empty |
+| `Models.Default`, `Models.Supervisor` | Right source wins when `Service` is non-empty |
+| `Models.Profiles` | Union; right source wins on name collision |
+| `MCP.Stdio`, `MCP.HTTP` | Union; right source wins on name collision |
+| `Skills` | Union with right source's paths first (shadow precedence) |
+| Supervisor default | Applied after merge: if `Models.Supervisor.Service == ""`, uses `Models.Default` |

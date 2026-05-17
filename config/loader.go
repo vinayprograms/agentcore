@@ -15,13 +15,18 @@ import (
 // ---------------------------------------------------------------------------
 
 type rawConfig struct {
-	Name         string                 `toml:"name"`
-	SecurityMode string                 `toml:"security_mode"`
-	Model        rawModel               `toml:"model"`
-	Supervisor   rawModel               `toml:"supervisor"`
-	Profiles     map[string]rawModel    `toml:"profiles"`
-	MCP          map[string]rawMCPEntry `toml:"mcp"`
-	Skills       rawSkills              `toml:"skills"`
+	Name       string                 `toml:"name"`
+	Security   rawSecurity            `toml:"security"`
+	Model      rawModel               `toml:"model"`
+	Supervisor rawModel               `toml:"supervisor"`
+	Profiles   map[string]rawModel    `toml:"profiles"`
+	MCP        map[string]rawMCPEntry `toml:"mcp"`
+	Skills     []string               `toml:"skills"`
+}
+
+type rawSecurity struct {
+	Level string `toml:"level"`
+	Scope string `toml:"scope"`
 }
 
 // rawModel maps a flat TOML model section to llm.Config. Retry fields sit
@@ -51,10 +56,6 @@ type rawMCPEntry struct {
 	Endpoint string            `toml:"endpoint"`
 }
 
-type rawSkills struct {
-	Paths []string `toml:"paths"`
-}
-
 // loadRaw decodes a single TOML file without applying any defaults.
 func loadRaw(path string) (rawConfig, error) {
 	var raw rawConfig
@@ -64,17 +65,17 @@ func loadRaw(path string) (rawConfig, error) {
 	return raw, nil
 }
 
-// mergeRaw applies override on top of base. Scalar fields (Name,
-// SecurityMode, Model, Supervisor) take the override value when non-zero.
-// Profiles, MCP, and SkillPaths are unioned; override wins on collision.
+// mergeRaw applies override on top of base. Scalar fields (Name, Security,
+// Model, Supervisor) take the override value when non-zero. Profiles, MCP,
+// and Skills are unioned; override wins on collision.
 func mergeRaw(base, override rawConfig) rawConfig {
 	result := base
 
 	if override.Name != "" {
 		result.Name = override.Name
 	}
-	if override.SecurityMode != "" {
-		result.SecurityMode = override.SecurityMode
+	if override.Security.Level != "" {
+		result.Security = override.Security
 	}
 	if override.Model.Service != "" {
 		result.Model = override.Model
@@ -97,15 +98,15 @@ func mergeRaw(base, override rawConfig) rawConfig {
 	}
 	maps.Copy(result.MCP, override.MCP)
 
-	result.Skills.Paths = dedupPaths(override.Skills.Paths, base.Skills.Paths)
+	result.Skills = dedupPaths(override.Skills, base.Skills)
 
 	return result
 }
 
-// toConfig converts a merged rawConfig to a Config, applying defaults and
-// validating transport constraints. The supervisor default (using DefaultModel
-// when the supervisor section is absent) is applied here so it reflects the
-// fully merged model rather than any individual layer's model.
+// toConfig converts a merged rawConfig to a Config, applying defaults.
+// The supervisor default (using Default model when absent) is applied after
+// merge so it reflects the fully merged model rather than any individual
+// layer's model.
 func (r rawConfig) toConfig() (Config, error) {
 	defaultModel, err := r.Model.toLLMConfig()
 	if err != nil {
@@ -136,13 +137,18 @@ func (r rawConfig) toConfig() (Config, error) {
 	}
 
 	return Config{
-		Name:            r.Name,
-		SecurityMode:    r.SecurityMode,
-		DefaultModel:    defaultModel,
-		SupervisorModel: supervisorModel,
-		Profiles:        profiles,
-		MCPServers:      mcpServers,
-		SkillPaths:      r.Skills.Paths,
+		Name: r.Name,
+		Models: Models{
+			Default:    defaultModel,
+			Supervisor: supervisorModel,
+			Profiles:   profiles,
+		},
+		MCP:    mcpServers,
+		Skills: r.Skills,
+		Security: Security{
+			Level: r.Security.Level,
+			Scope: r.Security.Scope,
+		},
 	}, nil
 }
 
