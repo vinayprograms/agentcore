@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strconv"
 	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -25,6 +26,7 @@ type convergence struct {
 	name        string
 	description string
 	within      int
+	withinVar   string
 	outputs     []string
 	using       []Step
 
@@ -34,9 +36,19 @@ type convergence struct {
 }
 
 // Convergence constructs a convergence with the given name, description, and
-// iteration cap. within must be > 0; this is checked at Validate time.
+// iteration cap. within must be > 0; this is checked at Validate time. Pass
+// 0 and call WithinVar to defer resolution until Execute (see WithinVar).
 func Convergence(name, description string, within int) *convergence {
 	return &convergence{name: name, description: description, within: within}
+}
+
+// WithinVar declares that the iteration cap is supplied by a workflow
+// variable resolved at Execute time against State.Outputs then State.Inputs.
+// The literal within passed to Convergence must be 0 when WithinVar is set;
+// mixing both is an error caught at Validate.
+func (c *convergence) WithinVar(name string) *convergence {
+	c.withinVar = name
+	return c
 }
 
 // Using attaches steps (typically agents) to this convergence.
@@ -105,7 +117,10 @@ func (c *convergence) Validate() error {
 	if strings.TrimSpace(c.description) == "" {
 		errs = append(errs, fmt.Errorf("convergence %s: description is required", c.name))
 	}
-	if c.within <= 0 {
+	switch {
+	case c.withinVar != "" && c.within != 0:
+		errs = append(errs, fmt.Errorf("convergence %s: 'within' and 'withinVar' are mutually exclusive", c.name))
+	case c.withinVar == "" && c.within <= 0:
 		errs = append(errs, fmt.Errorf("convergence %s: 'within' must be > 0", c.name))
 	}
 	for _, out := range c.outputs {
@@ -129,6 +144,7 @@ func (c *convergence) clone() Step {
 		name:        c.name,
 		description: c.description,
 		within:      c.within,
+		withinVar:   c.withinVar,
 		outputs:     slices.Clone(c.outputs),
 		override:    c.override,
 		supervision: c.supervision,
@@ -146,9 +162,14 @@ func (c *convergence) Execute(ctx context.Context, rt *Runtime, state *State) (e
 		return err
 	}
 
+	within, err := c.resolveWithin(state)
+	if err != nil {
+		return err
+	}
+
 	ctx, end := trace(ctx, "convergence.execute",
 		attribute.String("convergence", c.name),
-		attribute.Int("within", c.within))
+		attribute.Int("within", within))
 	defer end(&err)
 
 	// Apply this convergence's overrides on top of the parent's runtime.
@@ -167,7 +188,7 @@ func (c *convergence) Execute(ctx context.Context, rt *Runtime, state *State) (e
 			// (history-driven prompt construction). Reorient corrections
 			// from supervision are not threaded through individual
 			// iterations in v1 — the loop is a single supervised unit.
-			out, err := c.run(ctx, rt, state, description)
+			out, err := c.run(ctx, rt, state, description, within)
 			return out, nil, err
 		},
 	)
@@ -186,12 +207,36 @@ func (c *convergence) Execute(ctx context.Context, rt *Runtime, state *State) (e
 	return nil
 }
 
+// resolveWithin returns the effective iteration cap for this Execute. If
+// withinVar is set, looks the value up in state.Outputs then state.Inputs
+// and parses it as a positive int. Otherwise returns c.within unchanged.
+func (c *convergence) resolveWithin(state *State) (int, error) {
+	if c.withinVar == "" {
+		return c.within, nil
+	}
+	raw, ok := state.Outputs[c.withinVar]
+	if !ok {
+		raw, ok = state.Inputs[c.withinVar]
+	}
+	if !ok {
+		return 0, fmt.Errorf("convergence %s: withinVar %q unresolved at execute", c.name, c.withinVar)
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, fmt.Errorf("convergence %s: withinVar %q value %q is not an integer", c.name, c.withinVar, raw)
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("convergence %s: withinVar %q resolved to %d, must be > 0", c.name, c.withinVar, n)
+	}
+	return n, nil
+}
+
 // run executes the convergence loop, returning the last substantive output.
-func (c *convergence) run(ctx context.Context, rt *Runtime, state *State, description string) (string, error) {
+func (c *convergence) run(ctx context.Context, rt *Runtime, state *State, description string, within int) (string, error) {
 	var history []string
 	var lastSubstantive string
 
-	for range c.within {
+	for range within {
 		var iterOutput string
 		var err error
 
@@ -215,10 +260,10 @@ func (c *convergence) run(ctx context.Context, rt *Runtime, state *State, descri
 
 	rt.fire(ctx, ConvergenceCapReached{
 		Convergence: c.name,
-		Cap:         c.within,
+		Cap:         within,
 		LastOutput:  lastSubstantive,
 	})
-	state.Failures[c.name] = c.within
+	state.Failures[c.name] = within
 	return lastSubstantive, nil
 }
 

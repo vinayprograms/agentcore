@@ -304,6 +304,77 @@ func TestConvergence_FanOutSynthesisError(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// WithinVar — runtime-resolved iteration cap
+// ---------------------------------------------------------------------------
+
+func TestConvergence_WithinVarRejectsBothSet(t *testing.T) {
+	c := Convergence("c", "polish", 3).WithinVar("max")
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("got: %v", err)
+	}
+}
+
+func TestConvergence_WithinVarResolvesFromInputs(t *testing.T) {
+	rt := &Runtime{Model: &countingModel{reply: "still drafting"}}
+	c := Convergence("c", "polish", 0).WithinVar("max")
+	state := NewState(map[string]string{"max": "2"})
+	if err := c.Execute(context.Background(), rt, state); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if state.Failures["c"] != 2 {
+		t.Errorf("expected resolved cap of 2, got %d", state.Failures["c"])
+	}
+}
+
+func TestConvergence_WithinVarResolvesFromOutputsFirst(t *testing.T) {
+	rt := &Runtime{Model: &countingModel{reply: "still drafting"}}
+	c := Convergence("c", "polish", 0).WithinVar("max")
+	state := NewState(map[string]string{"max": "5"})
+	state.Outputs["max"] = "1"
+	if err := c.Execute(context.Background(), rt, state); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if state.Failures["c"] != 1 {
+		t.Errorf("expected outputs precedence (cap=1), got %d", state.Failures["c"])
+	}
+}
+
+func TestConvergence_WithinVarUnresolved(t *testing.T) {
+	c := Convergence("c", "polish", 0).WithinVar("max")
+	err := c.Execute(context.Background(), &Runtime{Model: stubModel{}}, NewState(nil))
+	if err == nil || !strings.Contains(err.Error(), "unresolved") {
+		t.Errorf("got: %v", err)
+	}
+}
+
+func TestConvergence_WithinVarNotAnInteger(t *testing.T) {
+	c := Convergence("c", "polish", 0).WithinVar("max")
+	state := NewState(map[string]string{"max": "lots"})
+	err := c.Execute(context.Background(), &Runtime{Model: stubModel{}}, state)
+	if err == nil || !strings.Contains(err.Error(), "not an integer") {
+		t.Errorf("got: %v", err)
+	}
+}
+
+func TestConvergence_WithinVarNonPositive(t *testing.T) {
+	c := Convergence("c", "polish", 0).WithinVar("max")
+	state := NewState(map[string]string{"max": "0"})
+	err := c.Execute(context.Background(), &Runtime{Model: stubModel{}}, state)
+	if err == nil || !strings.Contains(err.Error(), "must be > 0") {
+		t.Errorf("got: %v", err)
+	}
+}
+
+func TestConvergence_WithinVarPreservedAcrossClone(t *testing.T) {
+	c := Convergence("c", "polish", 0).WithinVar("max")
+	cp := c.clone().(*convergence)
+	if cp.withinVar != "max" {
+		t.Errorf("withinVar not preserved across clone: %q", cp.withinVar)
+	}
+}
+
 func TestConvergence_StructuredOutputsParsedAtEnd(t *testing.T) {
 	rt := &Runtime{Model: &countingModel{reply: `{"verdict":"ok","score":7}`}}
 	c := Convergence("c", "polish", 1).WithOutputs("verdict")

@@ -19,6 +19,7 @@ package workflow
 import (
 	"context"
 	"reflect"
+	"strings"
 )
 
 // Kind identifies the type of a workflow node returned by Node.Kind().
@@ -56,11 +57,12 @@ type Step interface {
 
 // kindOf derives a node's Kind from the concrete Go type, so renaming a type
 // (e.g. agent → persona) automatically updates the kind reported by Node.Kind.
-// The kind is the dereferenced type's name — no string literals to maintain.
+// The kind is the dereferenced type's name, lowercased so kinds remain a
+// stable contract regardless of whether the underlying type is exported.
 func kindOf(v any) Kind {
 	t := reflect.TypeOf(v)
 	if t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
-	return Kind(t.Name())
+	return Kind(strings.ToLower(t.Name()))
 }

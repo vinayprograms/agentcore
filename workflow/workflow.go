@@ -15,7 +15,7 @@ import (
 // the ordered list of sequences. Implements Node but not Step.
 //
 // Constructed via workflow.New — never directly.
-type workflow struct {
+type Workflow struct {
 	name       string
 	parameters []Parameter
 	sequences  []*sequence
@@ -29,8 +29,8 @@ type workflow struct {
 
 // New constructs a workflow with the given name. This is the package's primary
 // type, hence the New() prefix per Go convention.
-func New(name string) *workflow {
-	return &workflow{name: name}
+func New(name string) *Workflow {
+	return &Workflow{name: name}
 }
 
 // Input declares the workflow's parameter set in a single call. Each entry
@@ -44,14 +44,14 @@ func New(name string) *workflow {
 //
 // May be called multiple times to append additional parameters; each call
 // adds to the workflow's parameter set.
-func (w *workflow) Input(parameters ...Parameter) *workflow {
+func (w *Workflow) Input(parameters ...Parameter) *Workflow {
 	w.parameters = append(w.parameters, parameters...)
 	return w
 }
 
 // Add appends one or more sequences to this workflow. Each argument is
 // deep-copied — passing the same sequence to multiple workflows is safe.
-func (w *workflow) Add(sequences ...*sequence) *workflow {
+func (w *Workflow) Add(sequences ...*sequence) *Workflow {
 	for _, seq := range sequences {
 		w.sequences = append(w.sequences, seq.clone())
 	}
@@ -59,13 +59,13 @@ func (w *workflow) Add(sequences ...*sequence) *workflow {
 }
 
 // Supervise marks the workflow for LLM-driven supervision.
-func (w *workflow) Supervise() *workflow {
+func (w *Workflow) Supervise() *Workflow {
 	w.supervision = byLLM
 	return w
 }
 
 // SuperviseByHuman marks the workflow for supervision requiring human approval.
-func (w *workflow) SuperviseByHuman() *workflow {
+func (w *Workflow) SuperviseByHuman() *Workflow {
 	w.supervision = byHuman
 	return w
 }
@@ -73,7 +73,7 @@ func (w *workflow) SuperviseByHuman() *workflow {
 // Security declares the workflow-level content-guard mode. Calling this opts
 // the workflow in to building a *contentguard.Guard at Execute time using
 // Runtime.Model. For security.Research, pair this call with .Scope.
-func (w *workflow) Security(mode security.Mode) *workflow {
+func (w *Workflow) Security(mode security.Mode) *Workflow {
 	w.securityMode = mode
 	w.securityRequired = true
 	return w
@@ -82,20 +82,20 @@ func (w *workflow) Security(mode security.Mode) *workflow {
 // Scope declares the free-text scope for security.Research mode. It is
 // embedded in the reviewer stage's system prompt so the supervisor knows what
 // is permitted within the declared engagement.
-func (w *workflow) Scope(scope string) *workflow {
+func (w *Workflow) Scope(scope string) *Workflow {
 	w.securityScope = scope
 	return w
 }
 
 // Name implements Node.
-func (w *workflow) Name() string { return w.name }
+func (w *Workflow) Name() string { return w.name }
 
 // Kind implements Node.
-func (w *workflow) Kind() Kind { return kindOf(w) }
+func (w *Workflow) Kind() Kind { return kindOf(w) }
 
 // Children implements Node. Workflow children are runs only — inputs are
 // arguments to the workflow, not navigable nodes.
-func (w *workflow) Children() []Node {
+func (w *Workflow) Children() []Node {
 	nodes := make([]Node, 0, len(w.sequences))
 	for _, r := range w.sequences {
 		nodes = append(nodes, r)
@@ -109,7 +109,7 @@ func (w *workflow) Children() []Node {
 // If the workflow declared a security mode and rt.Guard is nil, Execute
 // builds a content guard from the declared mode/scope using rt.Model. The
 // caller's *env is never mutated — execution uses a derived shallow copy.
-func (w *workflow) Execute(ctx context.Context, rt *Runtime, inputs map[string]string) (state *State, err error) {
+func (w *Workflow) Execute(ctx context.Context, rt *Runtime, inputs map[string]string) (state *State, err error) {
 	state, err = w.bind(inputs)
 	if err != nil {
 		return nil, err
@@ -162,7 +162,7 @@ func (w *workflow) Execute(ctx context.Context, rt *Runtime, inputs map[string]s
 
 // bind resolves declared parameters against the provided values. An empty
 // Default on a parameter means "no default" — the caller must supply a value.
-func (w *workflow) bind(provided map[string]string) (*State, error) {
+func (w *Workflow) bind(provided map[string]string) (*State, error) {
 	seen := make(map[string]bool, len(w.parameters))
 	resolved := make(map[string]string, len(w.parameters))
 
@@ -189,7 +189,7 @@ func (w *workflow) bind(provided map[string]string) (*State, error) {
 //
 // Workflow.Execute calls Validate before doing anything; consumers may also
 // call it directly for ahead-of-time checks.
-func Validate(w *workflow, rt *Runtime) error {
+func Validate(w *Workflow, rt *Runtime) error {
 	var errs []error
 
 	// Workflow-level checks
@@ -267,7 +267,7 @@ func Validate(w *workflow, rt *Runtime) error {
 // scanSupervision walks the workflow tree and reports whether any node
 // requested supervision (anyMode) and whether any specifically requested
 // human-required supervision (anyHuman).
-func scanSupervision(w *workflow) (anyMode, anyHuman bool) {
+func scanSupervision(w *Workflow) (anyMode, anyHuman bool) {
 	var sup func(s supervision)
 	sup = func(s supervision) {
 		switch s {
